@@ -1,30 +1,38 @@
 # Deploying SplitSync
 
-SplitSync runs on the same EC2 host as Hopper and Sift, as its own Compose project
-(`splitsync`) on Hopper's Docker network, reached through Hopper's Caddy at
-**`http://<host>/splitsync/`**. It uses Hopper's Postgres (database `splitsync`, its own role) and
-Hopper's Redis (db 2). Nothing is published on the host: Caddy is the only way in.
+SplitSync runs on its own EC2 host, `portfolio-apps` (t3.small: 2 vCPU, 2 GB RAM plus 2 GB swap,
+20 GB gp3, ap-southeast-2, Elastic IP 3.25.14.19), which TriageLens will share later. It is live
+at **https://3-25-14-19.sslip.io/splitsync/**: sslip.io resolves the name to the IP, and Caddy
+gets a free Let's Encrypt certificate for it, so the site has HTTPS and HTTP/2 at no cost.
 
-| Process | Memory limit | Notes |
+| Compose project | Services | Notes |
 |---|---|---|
-| splitsync-app | 400 MB | Uvicorn, 2 workers; API, WebSockets and pages |
-| splitsync-migrate | (one-off) | `alembic upgrade head` |
+| `portfolio` (`/opt/portfolio`, from `deploy/portfolio/`) | caddy, postgres (pgvector 0.8.7-pg16), redis 8 | shared; the only published ports are Caddy's 80/443 |
+| `splitsync` (`deploy/compose.prod.yaml`) | splitsync-app (400 MB limit), splitsync-migrate (one-off) | on the `portfolio` network |
+
+The instance: Ubuntu 24.04, IMDSv2 required, encrypted EBS, CPU credits in standard mode (no
+surplus-credit charges), security group `portfolio-apps` with 80/443 open and 22 open for key-only
+SSH (GitHub's deploy runners connect from changing addresses). First boot installs Docker from
+Docker's apt repository and a 2 GB swap file.
 
 ## One-time setup on the host
 
 ```bash
-sudo mkdir -p /opt/splitsync && sudo chown ubuntu: /opt/splitsync
+sudo mkdir -p /opt/portfolio /opt/splitsync && sudo chown ubuntu: /opt/portfolio /opt/splitsync
 git clone https://github.com/Srinu-design/splitsync /opt/splitsync/src
-# A role and database in Hopper's Postgres; the password is generated on the host, never shown:
+cp /opt/splitsync/src/deploy/portfolio/{compose.yaml,Caddyfile} /opt/portfolio/
+# /opt/portfolio/.env (chmod 600): SITE_ADDRESS=3-25-14-19.sslip.io, POSTGRES_PASSWORD=<random>
+cd /opt/portfolio && docker compose up -d
+# A role and database for SplitSync; the password is generated on the host, never shown:
 pw=$(openssl rand -hex 24)
-docker exec -i hopper-postgres-1 psql -U hopper -d hopper -v ON_ERROR_STOP=1 \
+docker exec -i portfolio-postgres-1 psql -U portfolio -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE ROLE splitsync LOGIN PASSWORD '$pw'" -c "CREATE DATABASE splitsync OWNER splitsync"
 # /opt/splitsync/.env (chmod 600): DATABASE_URL=postgresql+asyncpg://splitsync:$pw@postgres:5432/splitsync,
-# REDIS_URL=redis://redis:6379/2, ALLOWED_ORIGINS=http://<host>, DB_POOL_SIZE=3, DB_MAX_OVERFLOW=2
+# REDIS_URL=redis://redis:6379/0, ALLOWED_ORIGINS=https://3-25-14-19.sslip.io, DB_POOL_SIZE=3, DB_MAX_OVERFLOW=2
 ```
 
-Hopper's side: its Caddyfile routes `/splitsync/` to `splitsync-app:8000` (`handle_path` strips the
-prefix; the pages use relative URLs, so they work under it).
+To go back to plain HTTP (for example if the certificate cannot be issued), set
+`SITE_ADDRESS=:80`, `ALLOWED_ORIGINS=http://3.25.14.19` and restart both projects.
 
 ## A release
 
@@ -58,7 +66,13 @@ One-time setup (the private key goes from the owner's machine to GitHub, never t
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/splitsync-deploy -N "" -C splitsync-github-deploy
 gh secret set EC2_SSH_KEY -R Srinu-design/splitsync < ~/.ssh/splitsync-deploy
-ssh-keygen -F <host> | grep -v '^#' | gh secret set EC2_KNOWN_HOSTS -R Srinu-design/splitsync
-gh variable set EC2_HOST -R Srinu-design/splitsync -b <host>
-gh variable set PUBLIC_URL -R Srinu-design/splitsync -b http://<host>/splitsync/
+ssh-keyscan -t ed25519 3.25.14.19 | gh secret set EC2_KNOWN_HOSTS -R Srinu-design/splitsync
+gh variable set EC2_HOST -R Srinu-design/splitsync -b 3.25.14.19
+gh variable set PUBLIC_URL -R Srinu-design/splitsync -b https://3-25-14-19.sslip.io/splitsync/
 ```
+
+## Stopping and starting
+
+The host can be stopped to save credits (`aws ec2 stop-instances --instance-ids i-07e0843077d6aa110`);
+the Elastic IP keeps the address, and every container restarts on boot. The Elastic IP's public
+IPv4 address is billed by the hour even while the instance is stopped.

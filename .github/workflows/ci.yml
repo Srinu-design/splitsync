@@ -15,12 +15,12 @@ jobs:
     services:
       # Same ports and password as docker-compose.yml, which the integration tests default to.
       postgres:
-        image: pgvector/pgvector:0.8.6-pg16-trixie   # production's build
+        image: pgvector/pgvector:0.8.7-pg16   # production's image (deploy/portfolio)
         env: { POSTGRES_PASSWORD: dev, POSTGRES_DB: splitsync_test }
         ports: ["5433:5432"]
         options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
       redis:
-        image: redis:7.4.11                           # production's build
+        image: redis:8-alpine                         # production's image
         ports: ["6380:6379"]
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
     env:

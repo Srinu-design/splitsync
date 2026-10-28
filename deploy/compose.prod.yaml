@@ -1,14 +1,14 @@
-# SplitSync on the production host, next to Hopper and Sift (deploy/deploy.sh drives it).
+# SplitSync on the portfolio-apps host (deploy/deploy.sh drives it).
 #   SPLITSYNC_IMAGE=splitsync:<sha> docker compose -p splitsync -f deploy/compose.prod.yaml --env-file /opt/splitsync/.env up -d
-# Joins Hopper's network (hopper_default) to reach its Postgres (database "splitsync", own role)
-# and Redis (db 2). Nothing is published: Hopper's Caddy routes /splitsync/ to splitsync-app.
+# Joins the shared "portfolio" network (deploy/portfolio/compose.yaml) to reach its Postgres
+# (database "splitsync", own role) and Redis. Nothing is published: Caddy routes /splitsync/ here.
 name: splitsync
 
 x-app: &app
   image: ${SPLITSYNC_IMAGE:?set SPLITSYNC_IMAGE to the release image}
   env_file: ${SPLITSYNC_ROOT:-/opt/splitsync}/.env
   init: true
-  networks: [hopper]
+  networks: [portfolio]
   logging:
     driver: json-file
     options: { max-size: 10m, max-file: "3" }
@@ -22,7 +22,7 @@ services:
   splitsync-app:
     <<: *app
     restart: unless-stopped
-    mem_limit: 400m   # two Uvicorn workers; the host has 3.8 GB shared with Hopper and Sift
+    mem_limit: 400m   # two Uvicorn workers, ~160 MB measured; the host has 2 GB plus 2 GB swap
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
       interval: 10s
@@ -30,6 +30,6 @@ services:
       retries: 30
 
 networks:
-  hopper:
-    name: hopper_default
+  portfolio:
+    name: portfolio
     external: true

@@ -1,0 +1,56 @@
+# Shared infrastructure of the portfolio-apps host (one t3.small): Caddy, the only public entry
+# point with automatic HTTPS; PostgreSQL with pgvector, one database and role per app; Redis.
+# Apps (SplitSync now, TriageLens later) are their own Compose projects on the "portfolio" network.
+#   cd /opt/portfolio && docker compose up -d      (.env: SITE_ADDRESS, POSTGRES_PASSWORD)
+name: portfolio
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: 10m, max-file: "3" }
+
+services:
+  caddy:
+    image: caddy:2.11.6
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS, e.g. 3-25-14-19.sslip.io or :80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates: keep it, or Let's Encrypt rate limits bite
+      - caddy_config:/config
+    restart: unless-stopped
+    logging: *logging
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16   # pgvector >= 0.8 for TriageLens's iterative scans
+    environment:
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=60",
+              "-c", "work_mem=4MB", "-c", "maintenance_work_mem=64MB"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio"]
+      interval: 5s
+      retries: 10
+    mem_limit: 512m
+    restart: unless-stopped
+    logging: *logging
+
+  redis:
+    image: redis:8-alpine
+    # Coordination only (Pub/Sub, rate limits, sweep lock): nothing to persist.
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction",
+              "--save", "", "--appendonly", "no"]
+    mem_limit: 96m
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  default:
+    name: portfolio
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+  pgdata: {}

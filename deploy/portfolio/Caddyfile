@@ -1,0 +1,19 @@
+# The portfolio-apps host's only public entry point. SITE_ADDRESS is a name whose DNS points here
+# (e.g. 3-25-14-19.sslip.io): Caddy gets a free certificate, redirects HTTP to HTTPS and serves
+# HTTP/2, which the SplitSync chaos demo needs (browsers send only 6 requests at once on HTTP/1.1).
+# ":80" serves plain HTTP on any address instead.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	redir / /splitsync/
+	# SplitSync: its pages use relative URLs, so they work under this prefix; WebSockets pass through.
+	redir /splitsync /splitsync/
+	handle_path /splitsync/* {
+		reverse_proxy splitsync-app:8000
+	}
+	# TriageLens will get its own handle_path block here.
+
+	handle {
+		respond "Not found" 404
+	}
+}
