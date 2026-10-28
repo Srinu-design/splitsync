@@ -6,7 +6,7 @@ SplitSync is a real-time group expense splitter. It turns a group's tangle of IO
 
 Money is integer paise, so balances always sum to exactly zero, and the ledger is append-only: an edit or delete adds a reversal entry instead of overwriting, so history is complete and any delete can be undone. Postgres row locks, version checks and idempotency keys enforce exactly-once writes, and every open client receives new state over WebSockets via Redis Pub/Sub.
 
-**Live demo: coming soon**
+**Live demo: [https://3-25-14-19.sslip.io/splitsync/](https://3-25-14-19.sslip.io/splitsync/)**: no login; *Try it* gives you a private seeded room. The host may be stopped between demos to save credits. Deployment: [docs/deploy.md](docs/deploy.md).
 
 ---
 
@@ -114,6 +114,25 @@ Measured against the local development environment (**Linux x86_64, 13th Gen Int
 | **Database Size at maximum room caps** | — | **32 MB** | 17.6 MB |
 
 All zero-sum ledger invariants (`zero_sum_paise == 0`, `drift == 0`, `bad_split_expenses == 0`, `orphan_edits == 0`) are validated after data generation and after the 20 writes.
+
+### On the EC2 host
+
+The same script on the live host (`portfolio-apps`, t3.small: 2 vCPU Xeon Platinum 8259CL, 2 GB RAM,
+PostgreSQL 16 with pgvector 0.8.7), first run on a fresh database, 2026-10-29. The instance's CPU
+credit balance was **0**, so it ran at the t3.small's **20% CPU baseline**: these are the host's
+slowest numbers, not its burst speed.
+
+| Operation | Median |
+| --- | --- |
+| Snapshot build (cache cleared; pairwise SQL 130 ms, integrity queries 310 ms) | 478 ms |
+| History page (50 items) | 109 ms |
+| Searches, five query shapes (each returns rows) | 14.6 ms (5.3–40.8 ms) |
+| Writes (20 sequential, real HTTP, new connection each) | 89.7 ms |
+| Database size with the full room | 25 MB |
+
+Throttled numbers are noisy: a later run at the same baseline, after two more full-room fills,
+measured writes at 449 ms and searches at 80 ms. Live memory (`docker stats`): splitsync-app 168 MB,
+Postgres 114 MB, Caddy 49 MB, Redis 8 MB.
 
 ---
 
