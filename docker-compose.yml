@@ -28,5 +28,38 @@ services:
       timeout: 3s
       retries: 30
 
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:dev@postgres:5432/splitsync"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8300:8000"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:dev@postgres:5432/splitsync"
+      REDIS_URL: "redis://redis:6379/0"
+      ALLOWED_ORIGINS: "http://localhost:8300"
+      EXPOSE_WORKER_PID: "true"
+      RATE_LIMIT_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)\""]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres_data:

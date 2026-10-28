@@ -1,3 +1,5 @@
+import asyncio
+import random
 import secrets
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -139,3 +141,52 @@ async def reset(engine, settings, slug, acted_by=None):
 
     await write_tx(engine, operation)
     return await build_snapshot(engine, settings, slug)
+
+
+async def sweep(engine, settings, redis_client=None) -> int:
+    token = secrets.token_urlsafe(16)
+    acquired = False
+    if redis_client is not None:
+        acquired = await redis_client.set_lock("splitsync:sweep", token, px=120000)
+    else:
+        # DECISION: When Redis is unavailable, every worker performs the idempotent sweep.
+        acquired = True
+
+    if not acquired:
+        return 0
+
+    total_deleted = 0
+    try:
+        while True:
+            async with engine.begin() as connection:
+                result = await connection.execute(
+                    text("""
+                    DELETE FROM groups WHERE id IN (
+                        SELECT id FROM groups WHERE expires_at < now() ORDER BY expires_at LIMIT 100
+                    )
+                """)
+                )
+                deleted = result.rowcount
+                total_deleted += deleted
+                if deleted == 0:
+                    break
+    finally:
+        if redis_client is not None:
+            await redis_client.release_lock("splitsync:sweep", token)
+
+    return total_deleted
+
+
+async def sweep_loop(engine, settings, redis_client, interval=None, jitter=None):
+    # DECISION: Use 600s ± 60s jitter by default, allowing callers to override for testing.
+    base_interval = interval if interval is not None else 600.0
+    jitter_range = jitter if jitter is not None else 60.0
+    while True:
+        try:
+            sleep_time = max(0.1, base_interval + random.uniform(-jitter_range, jitter_range))
+            await asyncio.sleep(sleep_time)
+            await sweep(engine, settings, redis_client)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass

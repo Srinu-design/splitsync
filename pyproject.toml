@@ -54,7 +54,8 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# DECISION: Default testpaths cover unit and integration; e2e runs explicitly via tests/e2e.
+testpaths = ["tests/unit", "tests/integration"]
 asyncio_mode = "auto"
 markers = [
     "integration: requires the local SplitSync PostgreSQL service",

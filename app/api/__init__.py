@@ -23,3 +23,22 @@ def idempotency_key(value: Annotated[str | None, Header(alias="Idempotency-Key")
 
 def response(result):
     return JSONResponse(result.body, status_code=result.status, headers=result.headers)
+
+
+def schedule_publish(background_tasks, app, slug: str, result) -> None:
+    # DECISION: Replays and unchanged edits skip background snapshot publishing.
+    if (
+        hasattr(result, "headers")
+        and result.headers
+        and result.headers.get("Idempotent-Replayed") == "true"
+    ):
+        return
+    if (
+        hasattr(result, "body")
+        and isinstance(result.body, dict)
+        and result.body.get("unchanged") is True
+    ):
+        return
+    from app.services.realtime import publish_snapshot_task
+
+    background_tasks.add_task(publish_snapshot_task, app, slug)

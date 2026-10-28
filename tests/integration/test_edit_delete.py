@@ -493,7 +493,7 @@ def test_service_sql_keeps_the_ledger_append_only():
         re.IGNORECASE,
     )
     services = Path(__file__).resolve().parents[2] / "app" / "services"
-    allow_delete = {("rooms.py", "reset")}
+    allow_delete = {("rooms.py", "reset"), ("rooms.py", "sweep")}
     for path in sorted(services.glob("*.py")):
         source = path.read_text()
         allowed = [
