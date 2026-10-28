@@ -8,3 +8,4 @@
 - Before finishing: `ruff check . && ruff format --check . && pytest` must pass. Never skip, xfail or delete a failing test to make it green.
 - Commit at the end of the phase on branch `main` with message `phase N: <what>`. Do not push.
 - Finish with a short report: files added, test count passed, every `# DECISION:` you made, anything you could not do.
+- Local ports: 8000, 8100, 3000, 9090 are used by other projects on this PC. SplitSync dev uses app 8300, Postgres 5433, Redis 6380. Compose project name `splitsync`. Never stop or touch containers of other projects (hopper, sift). If `docker` can't see containers, run `docker context ls` and use `DOCKER_CONTEXT=default`.

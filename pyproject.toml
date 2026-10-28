@@ -34,6 +34,8 @@ select = ["E", "F", "I", "B", "UP"]
 # DECISION: Keep the spec's reference code verbatim, including zip and long seed rows.
 "app/domain/allocation.py" = ["B905"]
 "app/seed_data.py" = ["E501"]
+# DECISION: Keep the schema DDL's original long lines without changing the spec block.
+"migrations/versions/0001_initial.py" = ["E501"]
 
 [tool.ruff.format]
 # DECISION: Preserve formatting in the four verbatim blocks and their source spec.
@@ -48,5 +50,6 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["integration: requires the local SplitSync PostgreSQL service"]
 # DECISION: Import ./app directly in plain test directories without packaging or test __init__.
 pythonpath = ["."]
