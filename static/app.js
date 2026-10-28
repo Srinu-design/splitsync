@@ -320,6 +320,8 @@
     let searchAbortController = null;
     let searchNextCursor = null;
     let historyNextCursor = null;
+    let historyLoadSeq = 0;
+    let historyAbortController = null;
     let currentLineageFilter = null;
     let lastDeletedVersionId = null;
 
@@ -597,7 +599,8 @@
           if (drifted.length > 0) {
             driftBadge.textContent = drifted.map(d => {
               const sign = d.drift_paise > 0 ? '+' : '−';
-              return d.name + ' ' + sign + formatMoney(Math.abs(d.drift_paise));
+              const memberName = memberMap.get(d.member_id)?.name || ('Member #' + d.member_id);
+              return memberName + ' ' + sign + formatMoney(Math.abs(d.drift_paise));
             }).join(' · ');
           } else {
             driftBadge.textContent = 'Drift: ' + formatMoney(driftTotal);
@@ -671,8 +674,8 @@
       // 6. Settlements Section
       renderSettlementsSection(snapshot, memberMap);
 
-      // 7. Activity Feed (initial load if empty)
-      loadHistoryFeed(false);
+      // 7. Activity Feed: reload from top on snapshot updates so items are newest-first and never duplicated
+      loadHistoryFeed(true);
 
       // 8. Search Panel dropdowns
       populateSearchDropdowns(snapshot);
@@ -947,6 +950,19 @@
         }
 
         mainDiv.appendChild(metaRow);
+
+        // Secondary line showing each member's share per Master Guide demo step 9
+        if (exp.shares && exp.shares.length > 0) {
+          const sharesRow = document.createElement('div');
+          sharesRow.className = 'item-meta item-shares';
+          const shareParts = exp.shares.map(s => {
+            const mName = memberMap.get(s.member_id)?.name || ('#' + s.member_id);
+            return mName + ' ' + formatMoney(s.share_paise);
+          });
+          sharesRow.textContent = shareParts.join(' · ');
+          mainDiv.appendChild(sharesRow);
+        }
+
         li.appendChild(mainDiv);
 
         const amountDiv = document.createElement('div');
@@ -1535,9 +1551,14 @@
       const feedList = document.getElementById('history-feed-list');
       if (!feedList) return;
 
+      const currentSeq = ++historyLoadSeq;
+      if (reset && historyAbortController) {
+        historyAbortController.abort();
+      }
+      historyAbortController = new AbortController();
+
       if (reset) {
         historyNextCursor = null;
-        while (feedList.firstChild) feedList.removeChild(feedList.firstChild);
       }
 
       if (clearLineageBtn) {
@@ -1550,13 +1571,20 @@
 
       const params = new URLSearchParams();
       params.set('limit', '50');
-      if (historyNextCursor) params.set('cursor', historyNextCursor);
+      if (!reset && historyNextCursor) params.set('cursor', historyNextCursor);
       if (currentLineageFilter) params.set('lineage', currentLineageFilter.toString());
 
       try {
-        const res = await fetch(BASE + 'api/rooms/' + slug + '/activity?' + params.toString());
+        const res = await fetch(BASE + 'api/rooms/' + slug + '/activity?' + params.toString(), {
+          signal: historyAbortController.signal,
+        });
         if (res.ok) {
           const data = await res.json();
+          // DECISION: Discard response if a newer load was initiated, preventing overlapping writes.
+          if (currentSeq !== historyLoadSeq) {
+            return;
+          }
+
           historyNextCursor = data.next_cursor;
           if (historyLoadMoreBtn) {
             if (historyNextCursor) {
@@ -1564,6 +1592,10 @@
             } else {
               historyLoadMoreBtn.classList.add('hidden');
             }
+          }
+
+          if (reset) {
+            while (feedList.firstChild) feedList.removeChild(feedList.firstChild);
           }
 
           const memberMap = new Map();
@@ -1579,50 +1611,54 @@
             const textLine = document.createElement('div');
             textLine.className = 'item-title';
 
-            // Actor label: self-reported tooltip or "Someone"
-            const actorSpan = document.createElement('span');
-            if (item.acted_by) {
-              const m = memberMap.get(item.acted_by);
-              actorSpan.textContent = m ? m.name : ('Member #' + item.acted_by);
-              actorSpan.title = 'self-reported';
-            } else {
-              actorSpan.textContent = 'Someone';
-            }
-            actorSpan.className = 'text-muted';
-            textLine.appendChild(actorSpan);
-
-            const contentSpan = document.createElement('span');
-            contentSpan.textContent = ' ';
-
             let showUndo = false;
             let undoExpenseId = null;
 
-            if (item.type === 'EXPENSE_ADDED') {
-              contentSpan.textContent += 'added ' + item.title + ': ' + formatMoney(item.total_paise);
-            } else if (item.type === 'EXPENSE_EDITED') {
-              contentSpan.textContent += 'edited ' + item.title + ': ' +
-                formatMoney(item.old_total_paise) + ' → ' + formatMoney(item.total_paise);
-            } else if (item.type === 'EXPENSE_RESTORED') {
-              contentSpan.textContent += 'restored ' + item.title + ': ' + formatMoney(item.total_paise);
-            } else if (item.type === 'EXPENSE_DELETED') {
-              contentSpan.textContent += 'deleted ' + item.title;
-              if (lastDeletedVersionId && lastDeletedVersionId === item.expense_id) {
-                showUndo = true;
-                undoExpenseId = item.expense_id;
+            if (item.type === 'MEMBER_ADDED') {
+              // DECISION: For MEMBER_ADDED show only "{name} joined" without actor.
+              const contentSpan = document.createElement('span');
+              contentSpan.textContent = item.name + ' joined';
+              textLine.appendChild(contentSpan);
+            } else {
+              // Actor label: self-reported tooltip or "Someone"
+              const actorSpan = document.createElement('span');
+              if (item.acted_by) {
+                const m = memberMap.get(item.acted_by);
+                actorSpan.textContent = m ? m.name : ('Member #' + item.acted_by);
+                actorSpan.title = 'self-reported';
+              } else {
+                actorSpan.textContent = 'Someone';
               }
-            } else if (item.type === 'SETTLEMENT_RECORDED') {
-              const from = memberMap.get(item.from)?.name || '#' + item.from;
-              const to = memberMap.get(item.to)?.name || '#' + item.to;
-              contentSpan.textContent += 'recorded settlement: ' + from + ' paid ' + to + ' ' + formatMoney(item.amount_paise);
-            } else if (item.type === 'SETTLEMENT_DELETED') {
-              const from = memberMap.get(item.from)?.name || '#' + item.from;
-              const to = memberMap.get(item.to)?.name || '#' + item.to;
-              contentSpan.textContent += 'deleted settlement: ' + from + ' → ' + to + ' ' + formatMoney(item.amount_paise);
-            } else if (item.type === 'MEMBER_ADDED') {
-              contentSpan.textContent += item.name + ' joined';
-            }
+              actorSpan.className = 'text-muted';
+              textLine.appendChild(actorSpan);
 
-            textLine.appendChild(contentSpan);
+              const contentSpan = document.createElement('span');
+              contentSpan.textContent = ' ';
+
+              if (item.type === 'EXPENSE_ADDED') {
+                contentSpan.textContent += 'added ' + item.title + ': ' + formatMoney(item.total_paise);
+              } else if (item.type === 'EXPENSE_EDITED') {
+                contentSpan.textContent += 'edited ' + item.title + ': ' +
+                  formatMoney(item.old_total_paise) + ' → ' + formatMoney(item.total_paise);
+              } else if (item.type === 'EXPENSE_RESTORED') {
+                contentSpan.textContent += 'restored ' + item.title + ': ' + formatMoney(item.total_paise);
+              } else if (item.type === 'EXPENSE_DELETED') {
+                contentSpan.textContent += 'deleted ' + item.title;
+                if (lastDeletedVersionId && lastDeletedVersionId === item.expense_id) {
+                  showUndo = true;
+                  undoExpenseId = item.expense_id;
+                }
+              } else if (item.type === 'SETTLEMENT_RECORDED') {
+                const from = memberMap.get(item.from)?.name || '#' + item.from;
+                const to = memberMap.get(item.to)?.name || '#' + item.to;
+                contentSpan.textContent += 'recorded settlement: ' + from + ' paid ' + to + ' ' + formatMoney(item.amount_paise);
+              } else if (item.type === 'SETTLEMENT_DELETED') {
+                const from = memberMap.get(item.from)?.name || '#' + item.from;
+                const to = memberMap.get(item.to)?.name || '#' + item.to;
+                contentSpan.textContent += 'deleted settlement: ' + from + ' → ' + to + ' ' + formatMoney(item.amount_paise);
+              }
+              textLine.appendChild(contentSpan);
+            }
 
             const timeSpan = document.createElement('span');
             timeSpan.className = 'item-meta';
@@ -1658,7 +1694,11 @@
             feedList.appendChild(li);
           });
         }
-      } catch (_) {}
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          // ignore network abort
+        }
+      }
     }
 
     // 8. Search Panel
@@ -1972,7 +2012,17 @@
 
           const summaryDiv = document.getElementById('chaos-summary');
           if (summaryDiv) {
-            const parts = Object.keys(counts).map(st => counts[st] + ' × ' + st);
+            // DECISION: Sort summary with success code (201, then 200) first, then other status codes.
+            const sortedKeys = Object.keys(counts).sort((a, b) => {
+              const ca = parseInt(a, 10);
+              const cb = parseInt(b, 10);
+              if (ca === 201) return -1;
+              if (cb === 201) return 1;
+              if (ca === 200) return -1;
+              if (cb === 200) return 1;
+              return ca - cb;
+            });
+            const parts = sortedKeys.map(st => counts[st] + ' × ' + st);
             summaryDiv.textContent = 'Summary: ' + parts.join(', ');
           }
 

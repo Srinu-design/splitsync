@@ -32,7 +32,8 @@
     members.forEach(m => memberMap.set(m.id, m));
 
     const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('viewBox', '0 0 400 400');
+    // DECISION: Expanded viewBox and adjusted circle radius ensure member name labels are never clipped.
+    svg.setAttribute('viewBox', '-35 -25 470 450');
     svg.setAttribute('class', 'graph-svg');
     svg.setAttribute('role', 'img');
 
@@ -68,8 +69,8 @@
 
     const cx = 200;
     const cy = 200;
-    const r = 130;
-    const nodeR = 15;
+    const r = 115;
+    const nodeR = 14;
     const n = members.length;
 
     const positions = new Map();
@@ -213,16 +214,39 @@
       initialsText.textContent = getInitials(m.name);
       nodeG.appendChild(initialsText);
 
-      // Name label offset outwards
-      const labelDist = 24;
-      const lx = pos.x + labelDist * Math.cos(pos.angle);
-      const ly = pos.y + labelDist * Math.sin(pos.angle);
+      // Name label offset outwards with anchor adjustment to prevent clipping
+      const cosA = Math.cos(pos.angle);
+      const sinA = Math.sin(pos.angle);
+      let anchor = 'middle';
+      let baseline = 'central';
+      let lx = pos.x;
+      let ly = pos.y;
+
+      if (cosA > 0.25) {
+        anchor = 'start';
+        lx = pos.x + nodeR + 6;
+        ly = pos.y + sinA * 6;
+      } else if (cosA < -0.25) {
+        anchor = 'end';
+        lx = pos.x - (nodeR + 6);
+        ly = pos.y + sinA * 6;
+      } else {
+        anchor = 'middle';
+        lx = pos.x;
+        if (sinA < 0) {
+          baseline = 'auto';
+          ly = pos.y - (nodeR + 6);
+        } else {
+          baseline = 'hanging';
+          ly = pos.y + (nodeR + 6);
+        }
+      }
 
       const nameText = document.createElementNS(SVG_NS, 'text');
       nameText.setAttribute('x', lx.toString());
       nameText.setAttribute('y', ly.toString());
-      nameText.setAttribute('text-anchor', 'middle');
-      nameText.setAttribute('dominant-baseline', 'central');
+      nameText.setAttribute('text-anchor', anchor);
+      nameText.setAttribute('dominant-baseline', baseline);
       nameText.setAttribute('font-size', '10');
       nameText.setAttribute('font-weight', '500');
       nameText.setAttribute('fill', '#64748b');
