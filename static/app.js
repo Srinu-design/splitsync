@@ -299,12 +299,86 @@
   function initRoomPage() {
     const match = location.pathname.match(/\/r\/([^\/?#]+)/);
     const slug = match ? match[1] : null;
+    let roomUnavailable = false;
+    let activeDialog = null;
+
+    function showRoomNotFound() {
+      roomUnavailable = true;
+      document.getElementById('room-not-found-msg')?.classList.remove('hidden');
+      document.getElementById('room-content')?.classList.add('hidden');
+      document.getElementById('room-loading')?.classList.add('hidden');
+      document.getElementById('room-main')?.setAttribute('aria-busy', 'false');
+      document.getElementById('room-title').textContent = 'Room not found';
+      document.title = 'Room not found · SplitSync';
+      document.getElementById('room-not-found-msg')?.focus();
+    }
+
+    function dialogFocusable(panel) {
+      return Array.from(panel.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter(element => element.getClientRects().length > 0);
+    }
+
+    function closeRoomDialog(returnFocus = true) {
+      if (!activeDialog) return;
+      const { overlay, opener } = activeDialog;
+      overlay.classList.add('hidden');
+      overlay.setAttribute('aria-hidden', 'true');
+      opener?.setAttribute('aria-expanded', 'false');
+      document.body.classList.remove('drawer-open');
+      document.querySelectorAll('.nav-shell, .status-bar, #room-main, .room-footer').forEach(node => {
+        node.inert = false;
+      });
+      activeDialog = null;
+      if (returnFocus) {
+        const destination = opener?.isConnected ? opener : document.getElementById('open-history-btn');
+        destination?.focus();
+      }
+    }
+
+    // DECISION: Keep modal focus inside the active drawer and make the room behind it inert.
+    function openRoomDialog(id, opener = document.activeElement) {
+      closeRoomDialog(false);
+      const panel = document.getElementById(id);
+      const overlay = panel?.closest('.drawer-overlay');
+      if (!panel || !overlay) return;
+      overlay.classList.remove('hidden');
+      panel.classList.remove('hidden');
+      overlay.setAttribute('aria-hidden', 'false');
+      opener?.setAttribute('aria-expanded', 'true');
+      document.body.classList.add('drawer-open');
+      document.querySelectorAll('.nav-shell, .status-bar, #room-main, .room-footer').forEach(node => {
+        node.inert = true;
+      });
+      activeDialog = { panel, overlay, opener };
+      (id === 'search-panel' ? document.getElementById('search-query-input') : dialogFocusable(panel)[0] || panel)?.focus();
+    }
+
+    document.querySelectorAll('.drawer-overlay').forEach(overlay => {
+      overlay.addEventListener('click', event => {
+        if (event.target === overlay) closeRoomDialog();
+      });
+    });
+    document.addEventListener('keydown', event => {
+      if (!activeDialog) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeRoomDialog();
+      } else if (event.key === 'Tab') {
+        const focusable = dialogFocusable(activeDialog.panel);
+        const first = focusable[0] || activeDialog.panel;
+        const last = focusable[focusable.length - 1] || first;
+        if (!activeDialog.panel.contains(document.activeElement) ||
+            (event.shiftKey && document.activeElement === first) ||
+            (!event.shiftKey && document.activeElement === last)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        }
+      }
+    });
 
     if (!slug) {
-      const notFound = document.getElementById('room-not-found-msg');
-      const content = document.getElementById('room-content');
-      if (notFound) notFound.classList.remove('hidden');
-      if (content) content.classList.add('hidden');
+      showRoomNotFound();
       return;
     }
 
@@ -323,19 +397,30 @@
     let historyLoadSeq = 0;
     let historyAbortController = null;
     let currentLineageFilter = null;
-    let lastDeletedVersionId = null;
+    // Lineages already shown in the feed (newest first): a delete below a newer item for its lineage is no longer undoable.
+    let feedSeenLineages = new Set();
 
     const copyBtn = document.getElementById('copy-link-btn');
     if (copyBtn) {
-      copyBtn.addEventListener('click', copyRoomLink);
+      copyBtn.addEventListener('click', async () => {
+        await copyRoomLink();
+        if (!document.getElementById('copy-fallback-dialog')?.classList.contains('hidden')) {
+          openRoomDialog('copy-fallback-panel', copyBtn);
+          document.getElementById('copy-link-input')?.select();
+        }
+      });
     }
     const copyCloseBtn = document.getElementById('copy-fallback-close-btn');
     if (copyCloseBtn) {
-      copyCloseBtn.addEventListener('click', () => {
-        const dialog = document.getElementById('copy-fallback-dialog');
-        if (dialog) dialog.classList.add('hidden');
-      });
+      copyCloseBtn.addEventListener('click', () => closeRoomDialog());
     }
+
+    document.getElementById('close-history-btn')?.addEventListener('click', () => closeRoomDialog());
+    document.getElementById('open-history-btn')?.addEventListener('click', event => {
+      currentLineageFilter = null;
+      openRoomDialog('history-drawer', event.currentTarget);
+      loadHistoryFeed(true);
+    });
 
     const actingPicker = document.getElementById('acting-member-picker');
     if (actingPicker) {
@@ -368,6 +453,7 @@
 
     // Connect WebSocket
     function connectWs() {
+      if (roomUnavailable) return;
       if (ws) {
         try { ws.close(); } catch (_) {}
       }
@@ -420,6 +506,7 @@
 
     // Reconnect with exponential backoff: 1, 2, 4, 8, 16, then 30 s + 0–500 ms jitter
     function scheduleReconnect() {
+      if (roomUnavailable) return;
       clearTimeout(reconnectTimeout);
       const delays = [1000, 2000, 4000, 8000, 16000];
       const baseDelay = reconnectAttempts < delays.length ? delays[reconnectAttempts] : 30000;
@@ -448,10 +535,10 @@
         }
 
         if (res.status === 404) {
-          const notFound = document.getElementById('room-not-found-msg');
-          const content = document.getElementById('room-content');
-          if (notFound) notFound.classList.remove('hidden');
-          if (content) content.classList.add('hidden');
+          showRoomNotFound();
+          clearTimeout(reconnectTimeout);
+          clearInterval(pingInterval);
+          if (ws) ws.close();
           return;
         }
 
@@ -548,6 +635,11 @@
     // RENDER STATE
     // ==========================================
     function renderState(snapshot) {
+      document.getElementById('room-loading')?.classList.add('hidden');
+      document.getElementById('room-content')?.classList.remove('hidden');
+      document.getElementById('room-not-found-msg')?.classList.add('hidden');
+      document.getElementById('room-main')?.setAttribute('aria-busy', 'false');
+      document.title = snapshot.room.name + ' · SplitSync';
       currentSnapshot = snapshot;
       currentVersion = snapshot.room.graph_version;
       saveRoomToHistory(slug, snapshot.room.name, snapshot.room.kind);
@@ -580,7 +672,7 @@
         const zeroSum = snapshot.invariants.zero_sum_paise;
         if (zeroSum === 0) {
           sigmaBadge.className = 'badge badge-success';
-          sigmaBadge.textContent = 'Σ ₹0.00';
+          sigmaBadge.textContent = 'Σ ' + formatMoney(0);
         } else {
           sigmaBadge.className = 'badge badge-danger';
           sigmaBadge.textContent = 'Σ ' + formatMoney(zeroSum);
@@ -592,7 +684,7 @@
         const driftTotal = snapshot.invariants.ledger_drift_total_paise;
         if (driftTotal === 0) {
           driftBadge.className = 'badge badge-success';
-          driftBadge.textContent = 'Drift: ₹0.00';
+          driftBadge.textContent = '✓ Drift: ' + formatMoney(0);
         } else {
           driftBadge.className = 'badge badge-danger';
           const drifted = snapshot.invariants.drifted_members || [];
@@ -744,6 +836,10 @@
       const activePlanEdges = (activePlanType === 'OPTIMAL' && isOptimalAvailable)
         ? snapshot.graph.optimal.edges
         : (snapshot.graph.greedy ? snapshot.graph.greedy.edges : []);
+      document.getElementById('pairwise-count').textContent = pairwiseCount;
+      document.getElementById('plan-count').textContent = activePlanEdges.length;
+      document.getElementById('plan-heading').textContent =
+        activePlanType === 'OPTIMAL' && isOptimalAvailable ? 'Optimal plan' : 'Greedy plan';
 
       // If <= 15 members: SVG mode. If > 15 members: List mode.
       if (snapshot.members.length <= 15) {
@@ -842,6 +938,7 @@
         balancesContainer.removeChild(balancesContainer.firstChild);
       }
 
+      const maxAbs = Math.max(1, ...snapshot.members.map(m => Math.abs(m.net_balance_paise || 0)));
       snapshot.members.forEach(m => {
         const card = document.createElement('div');
         card.className = 'balance-card';
@@ -861,10 +958,21 @@
         nameRow.appendChild(nameSpan);
         card.appendChild(nameRow);
 
+        const net = m.net_balance_paise || 0;
+        const track = document.createElement('div');
+        track.className = 'balance-track';
+        track.setAttribute('aria-hidden', 'true');
+        const zero = document.createElement('span');
+        zero.className = 'balance-zero-line';
+        const bar = document.createElement('span');
+        bar.className = net < 0 ? 'balance-bar is-negative' : 'balance-bar';
+        bar.style.setProperty('--balance-width', (Math.abs(net) / maxAbs * 50) + '%');
+        track.append(zero, bar);
+        card.appendChild(track);
+
         const amountRow = document.createElement('div');
         amountRow.className = 'balance-amount';
 
-        const net = m.net_balance_paise || 0;
         if (net > 0) {
           amountRow.classList.add('balance-positive');
           amountRow.textContent = '+' + formatMoney(net);
@@ -998,7 +1106,6 @@
               },
             });
             if (res.ok) {
-              lastDeletedVersionId = exp.id;
               // 10 s toast "Deleted '<title>' — Undo" (restore with a new key)
               showToast(
                 "Deleted '" + exp.title + "'",
@@ -1596,6 +1703,7 @@
 
           if (reset) {
             while (feedList.firstChild) feedList.removeChild(feedList.firstChild);
+            feedSeenLineages = new Set();
           }
 
           const memberMap = new Map();
@@ -1644,7 +1752,7 @@
                 contentSpan.textContent += 'restored ' + item.title + ': ' + formatMoney(item.total_paise);
               } else if (item.type === 'EXPENSE_DELETED') {
                 contentSpan.textContent += 'deleted ' + item.title;
-                if (lastDeletedVersionId && lastDeletedVersionId === item.expense_id) {
+                if (!feedSeenLineages.has(item.lineage_id)) {
                   showUndo = true;
                   undoExpenseId = item.expense_id;
                 }
@@ -1659,6 +1767,7 @@
               }
               textLine.appendChild(contentSpan);
             }
+            if (item.lineage_id) feedSeenLineages.add(item.lineage_id);
 
             const timeSpan = document.createElement('span');
             timeSpan.className = 'item-meta';

@@ -10,6 +10,7 @@ def assert_security_headers(response):
     assert response.headers.get("Content-Security-Policy") == EXPECTED_CSP
     assert response.headers.get("X-Content-Type-Options") == "nosniff"
     assert response.headers.get("Referrer-Policy") == "same-origin"
+    assert response.headers.get("Cache-Control") == "no-cache"
 
 
 @pytest.mark.asyncio
@@ -21,6 +22,8 @@ async def test_pages_and_static_files(client):
     assert "text/html" in res_index.headers.get("content-type", "")
     assert "Start demo" in res_index.text
     assert "Create a group" in res_index.text
+    for panel in ("about", "how-it-works", "try"):
+        assert f'id="{panel}"' in res_index.text
     assert_security_headers(res_index)
 
     # GET /r/{slug} (Room page, always 200 for any slug)
@@ -47,6 +50,11 @@ async def test_pages_and_static_files(client):
     assert res_css.status_code == 200
     assert "css" in res_css.headers.get("content-type", "")
     assert_security_headers(res_css)
+
+    for asset in ("theme.js", "site.js", "favicon.svg"):
+        response = await client.get(f"/static/{asset}")
+        assert response.status_code == 200
+        assert_security_headers(response)
 
 
 @pytest.mark.asyncio

@@ -260,8 +260,10 @@
     container.appendChild(svg);
 
     // Accessible hidden table of edges
+    // A table ignores width: 1px, so the visually hidden box is a div around it.
+    const hidden = document.createElement('div');
+    hidden.className = 'sr-only';
     const table = document.createElement('table');
-    table.className = 'sr-only';
 
     const caption = document.createElement('caption');
     caption.textContent = titleText + ' — ' + descText;
@@ -298,7 +300,8 @@
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
-    container.appendChild(table);
+    hidden.appendChild(table);
+    container.appendChild(hidden);
   }
 
   global.SplitSyncGraph = {

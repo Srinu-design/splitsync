@@ -68,6 +68,8 @@ def create_app(settings=None):
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
+        # Revalidate pages and assets (cheap with the ETag) so a deploy shows at once.
+        response.headers.setdefault("Cache-Control", "no-cache")
         return response
 
     for router in (
