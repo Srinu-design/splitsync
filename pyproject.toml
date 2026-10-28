@@ -1,0 +1,52 @@
+[project]
+name = "splitsync"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.162.*",
+    "uvicorn[standard]==0.54.*",
+    "sqlalchemy[asyncio]==2.1.*",
+    "asyncpg==0.32.*",
+    "alembic==1.20.*",
+    "pydantic==2.14.*",
+    "pydantic-settings==2.16.*",
+    "redis==8.1.*",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.*",
+    "pytest-asyncio==1.4.*",
+    "hypothesis==6.170.*",
+    "httpx==0.28.*",
+    "websockets==17.3.*",
+    "ruff==0.17.*",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# DECISION: Keep the spec's reference code verbatim, including zip and long seed rows.
+"app/domain/allocation.py" = ["B905"]
+"app/seed_data.py" = ["E501"]
+
+[tool.ruff.format]
+# DECISION: Preserve formatting in the four verbatim blocks and their source spec.
+exclude = [
+    "app/domain/money.py",
+    "app/domain/allocation.py",
+    "app/domain/simplify.py",
+    "app/seed_data.py",
+    "docs/SPEC.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# DECISION: Import ./app directly in plain test directories without packaging or test __init__.
+pythonpath = ["."]
