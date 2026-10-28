@@ -7,8 +7,10 @@ Fills one GROUP to its caps:
   - 1,000 reversals
 using asyncpg COPY directly against DATABASE_URL.
 Keeps balances consistent so ledger invariants stay 0.
-Times snapshot build, history page, 5 searches, and 20 writes via the real services.
-Prints a table of medians and database size, then cleans up.
+Times snapshot build (bypassing LRU cache before each run), history page,
+5 searches, and 20 writes via real HTTP against the running app.
+Prints a table of medians, search row counts, snapshot split, and database size,
+asserts invariants after the writes, then cleans up.
 """
 
 import asyncio
@@ -22,13 +24,21 @@ from datetime import UTC, date, datetime, timedelta
 
 import asyncpg
 import httpx
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
-from app.main import create_app
+from app.domain.simplify import pairwise_edges, plans
 from app.services.history import list_activity
 from app.services.search import find_expenses
-from app.services.state import build_snapshot
+from app.services.state import (
+    BAD_SPLITS_SQL,
+    INTEGRITY_SQL,
+    ORPHAN_EDITS_SQL,
+    OWED_SQL,
+    _caches,
+    build_snapshot,
+)
 
 
 def get_pg_dsn(url: str) -> str:
@@ -41,11 +51,13 @@ def get_pg_dsn(url: str) -> str:
 async def run_load_check():
     settings = get_settings()
     db_url = os.getenv("DATABASE_URL", settings.DATABASE_URL)
+    base_url = os.getenv("BASE_URL", "http://localhost:8300")
     pg_dsn = get_pg_dsn(db_url)
 
     print("=" * 60)
-    print("SplitSync Phase 8 Load Check (SPEC §12)")
+    print("SplitSync Phase 8b Load Check (SPEC §12)")
     print(f"Connecting to database: {pg_dsn.split('@')[-1]}")
+    print(f"Targeting HTTP API:     {base_url}")
     print("=" * 60)
 
     conn = await asyncpg.connect(pg_dsn)
@@ -117,11 +129,9 @@ async def run_load_check():
         net_balances = {m_id: 0 for m_id in member_ids}
 
         # 3. 9,900 expenses
-        # Pre-allocate IDs for expenses
         start_exp_id = await conn.fetchval(
             "SELECT nextval('expenses_id_seq') FROM generate_series(1, 9900) LIMIT 1"
         )
-        # Advance sequence by remaining 9899
         await conn.execute("SELECT nextval('expenses_id_seq') FROM generate_series(1, 9899)")
         expense_ids = list(range(start_exp_id, start_exp_id + 9900))
 
@@ -131,14 +141,14 @@ async def run_load_check():
         titles = [
             "Villa booking (2 nights)",
             "Beach-shack seafood dinner",
-            "Scooter rentals",
-            "Dudhsagar jeep safari",
-            "Parasailing adventure",
-            "Cafe brunch with team",
-            "Club night drinks",
-            "Groceries and snacks",
-            "Airport taxi transfer",
-            "Island tour excursion",
+            "Scooter rentals in Goa",
+            "Dudhsagar jeep safari tour",
+            "Parasailing adventure trip",
+            "Cafe brunch with friends",
+            "Club night drinks and snacks",
+            "Groceries and beach snacks",
+            "Airport taxi transfer trip",
+            "Island boat tour excursion",
         ]
 
         total_paise_per_exp = 6000  # ₹60.00 split 6 ways = 1000 paise each
@@ -150,10 +160,6 @@ async def run_load_check():
             payer_idx = idx % 50
             payer_id = member_ids[payer_idx]
             title = titles[idx % len(titles)]
-            if idx == 0:
-                title = "Villa booking (2 nights)"
-            elif idx == 1:
-                title = "Beach-shack seafood dinner"
 
             payload = {"title": title, "amount": "60.00"}
             payload_hash = hashlib.sha256(json.dumps(payload).encode()).hexdigest()
@@ -330,20 +336,48 @@ async def run_load_check():
 
         # 7. Benchmark with real application services
         engine = create_async_engine(db_url)
-        app = create_app(settings)
 
-        # (a) Snapshot build (median of 5, cache bypassed)
-        print("Measuring snapshot build (5 runs)...")
+        # (a) Snapshot build: CLEAR LRU CACHE before each of the 5 runs
+        print("Measuring snapshot build (5 real builds, cache cleared before each run)...")
         snap_times = []
+        snap = None
         for _ in range(5):
+            _caches.clear()  # Clear in-process LRU cache so each run is a real build
             t0 = time.perf_counter()
             snap = await build_snapshot(engine, settings, slug)
             elapsed_ms = (time.perf_counter() - t0) * 1000
             snap_times.append(elapsed_ms)
             assert snap["invariants"]["zero_sum_paise"] == 0
             assert snap["invariants"]["bad_split_expenses"] == 0
+
         snapshot_median = statistics.median(snap_times)
         print(f"  Snapshot build median: {snapshot_median:.1f} ms")
+
+        # Measure snapshot breakdown components
+        async with engine.begin() as sql_conn:
+            # 1. Pairwise SQL (OWED_SQL)
+            t0 = time.perf_counter()
+            owed_rows = (await sql_conn.execute(text(OWED_SQL), {"gid": group_id})).all()
+            pairwise_sql_ms = (time.perf_counter() - t0) * 1000
+
+            # 2. Integrity queries
+            t0 = time.perf_counter()
+            await sql_conn.execute(text(INTEGRITY_SQL), {"gid": group_id})
+            await sql_conn.scalar(text(BAD_SPLITS_SQL), {"gid": group_id})
+            await sql_conn.scalar(text(ORPHAN_EDITS_SQL), {"gid": group_id})
+            integrity_ms = (time.perf_counter() - t0) * 1000
+
+        # 3. Python plans
+        owed = {(debtor, creditor): amt for debtor, creditor, amt in owed_rows}
+        balances = {m["id"]: m["net_balance_paise"] for m in snap["members"]}
+        t0 = time.perf_counter()
+        _ = plans(balances, settings.EXACT_MAX_NONZERO)
+        _ = sorted(pairwise_edges(balances, owed), key=lambda edge: (-edge[2], edge[0], edge[1]))
+        python_plans_ms = (time.perf_counter() - t0) * 1000
+        print(
+            f"  Snapshot split: pairwise SQL {pairwise_sql_ms:.1f} ms, "
+            f"integrity queries {integrity_ms:.1f} ms, Python plans {python_plans_ms:.1f} ms"
+        )
 
         # (b) One history page of 50
         print("Measuring history page (50 items)...")
@@ -353,46 +387,56 @@ async def run_load_check():
         assert len(history_page["items"]) == 50
         print(f"  History page (50): {history_ms:.1f} ms")
 
-        # (c) Five searches
+        # (c) Five searches (print row counts and assert each returns >= 1)
         print("Measuring 5 searches...")
         # 1. 'vil' prefix
         t0 = time.perf_counter()
         s1 = await find_expenses(engine, settings, slug, q="vil")
         s1_ms = (time.perf_counter() - t0) * 1000
+        c1 = len(s1["items"])
+        assert c1 >= 1, f"Search 'vil' returned {c1} rows"
+        print(f"  Search 'vil': {s1_ms:.1f} ms (found {c1} rows)")
 
         # 2. 'seafood din' two-word
         t0 = time.perf_counter()
         s2 = await find_expenses(engine, settings, slug, q="seafood din")
         s2_ms = (time.perf_counter() - t0) * 1000
+        c2 = len(s2["items"])
+        assert c2 >= 1, f"Search 'seafood din' returned {c2} rows"
+        print(f"  Search 'seafood din': {s2_ms:.1f} ms (found {c2} rows)")
 
         # 3. paid_by filter
         t0 = time.perf_counter()
         s3 = await find_expenses(engine, settings, slug, paid_by=member_ids[0])
         s3_ms = (time.perf_counter() - t0) * 1000
+        c3 = len(s3["items"])
+        assert c3 >= 1, f"Search paid_by returned {c3} rows"
+        print(f"  Search paid_by: {s3_ms:.1f} ms (found {c3} rows)")
 
         # 4. amount range filter
         t0 = time.perf_counter()
         s4 = await find_expenses(engine, settings, slug, min_amount="50.00", max_amount="70.00")
         s4_ms = (time.perf_counter() - t0) * 1000
+        c4 = len(s4["items"])
+        assert c4 >= 1, f"Search amount range returned {c4} rows"
+        print(f"  Search amount range: {s4_ms:.1f} ms (found {c4} rows)")
 
         # 5. include_deleted
         t0 = time.perf_counter()
         s5 = await find_expenses(engine, settings, slug, include_deleted=True)
         s5_ms = (time.perf_counter() - t0) * 1000
+        c5 = len(s5["items"])
+        assert c5 >= 1, f"Search include_deleted returned {c5} rows"
+        print(f"  Search include_deleted: {s5_ms:.1f} ms (found {c5} rows)")
 
         searches_median = statistics.median([s1_ms, s2_ms, s3_ms, s4_ms, s5_ms])
-        print(f"  Search 'vil': {s1_ms:.1f} ms (found {len(s1['items'])})")
-        print(f"  Search 'seafood din': {s2_ms:.1f} ms (found {len(s2['items'])})")
-        print(f"  Search paid_by: {s3_ms:.1f} ms (found {len(s3['items'])})")
-        print(f"  Search amount range: {s4_ms:.1f} ms (found {len(s4['items'])})")
-        print(f"  Search include_deleted: {s5_ms:.1f} ms (found {len(s5['items'])})")
         print(f"  Searches median: {searches_median:.1f} ms")
 
-        # (d) 20 writes via API (incl. connection)
-        print("Measuring 20 writes via API...")
+        # (d) 20 writes over REAL HTTP against the running compose app
+        print(f"Measuring 20 writes via real HTTP against {base_url} (one client per write)...")
         write_times = []
         for w_idx in range(20):
-            idem_key = f"load-write-{w_idx:06d}-idem-val"
+            idem_key = f"load-write-{w_idx:06d}-idem-real-val"
             w_body = {
                 "title": f"Bench write expense {w_idx}",
                 "paid_by": member_ids[0],
@@ -402,45 +446,59 @@ async def run_load_check():
                     "members": [{"id": m_id} for m_id in member_ids[:6]],
                 },
             }
-            # Each write opens a fresh AsyncClient to include connection overhead
+            # Time over real HTTP with one fresh client per write (including TCP handshake overhead)
             t0 = time.perf_counter()
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with httpx.AsyncClient(base_url=base_url) as client:
                 res = await client.post(
                     f"/api/rooms/{slug}/expenses",
                     headers={"Idempotency-Key": idem_key},
                     json=w_body,
                 )
             elapsed = (time.perf_counter() - t0) * 1000
-            assert res.status_code == 201, res.text
+            assert res.status_code == 201, f"Write {w_idx} failed: {res.status_code} {res.text}"
             write_times.append(elapsed)
-        write_median = statistics.median(write_times)
-        print(f"  Writes (20) median: {write_median:.1f} ms")
 
-        # 8. Print Results Table
-        print("\n" + "=" * 60)
+        write_median = statistics.median(write_times)
+        print(f"  Writes (20) real HTTP median: {write_median:.1f} ms")
+
+        # 8. Assert all invariants after the 20 writes
+        _caches.clear()
+        post_snap = await build_snapshot(engine, settings, slug)
+        post_inv = post_snap["invariants"]
+        assert post_inv["zero_sum_paise"] == 0, f"zero_sum_paise != 0: {post_inv}"
+        assert post_inv["bad_split_expenses"] == 0, f"bad_splits != 0: {post_inv}"
+        assert post_inv["orphan_edits"] == 0, f"orphan_edits != 0: {post_inv}"
+        assert post_inv["ledger_drift_total_paise"] == 0, f"drift != 0: {post_inv}"
+        print(
+            "Asserted invariants after 20 writes: zero_sum=0, drift=0, bad_splits=0, orphan_edits=0"
+        )
+
+        # 9. Print Results Table
+        print("\n" + "=" * 65)
         print("LOAD CHECK RESULTS (SPEC §12)")
-        print("=" * 60)
+        print("=" * 65)
         print(f"Database Size: {db_size_str}")
-        print("-" * 60)
-        print(f"{'Operation':<35} | {'Measured Median':<18}")
-        print("-" * 60)
-        print(f"{'Snapshot build (median of 5)':<35} | {snapshot_median:6.1f} ms")
-        print(f"{'History page (50 items)':<35} | {history_ms:6.1f} ms")
-        print(f"{'Search 1 (prefix "vil")':<35} | {s1_ms:6.1f} ms")
-        print(f"{'Search 2 (two-word "seafood din")':<35} | {s2_ms:6.1f} ms")
-        print(f"{'Search 3 (paid_by filter)':<35} | {s3_ms:6.1f} ms")
-        print(f"{'Search 4 (amount range 50-70)':<35} | {s4_ms:6.1f} ms")
-        print(f"{'Search 5 (include_deleted)':<35} | {s5_ms:6.1f} ms")
-        print(f"{'Searches median':<35} | {searches_median:6.1f} ms")
-        print(f"{'Writes (20 sequential via API)':<35} | {write_median:6.1f} ms")
-        print("=" * 60 + "\n")
+        print("-" * 65)
+        print(f"{'Operation':<38} | {'Rows':<6} | {'Measured Median':<15}")
+        print("-" * 65)
+        print(f"{'Snapshot build (median of 5, real)':<38} | {'-':<6} | {snapshot_median:6.1f} ms")
+        print(f"  {'Pairwise SQL':<36} | {'-':<6} | {pairwise_sql_ms:6.1f} ms")
+        print(f"  {'Integrity queries':<36} | {'-':<6} | {integrity_ms:6.1f} ms")
+        print(f"  {'Python plans':<36} | {'-':<6} | {python_plans_ms:6.1f} ms")
+        print(f"{'History page (50 items)':<38} | {50:<6} | {history_ms:6.1f} ms")
+        print(f"{'Search 1 (prefix "vil")':<38} | {c1:<6} | {s1_ms:6.1f} ms")
+        print(f"{'Search 2 (two-word "seafood din")':<38} | {c2:<6} | {s2_ms:6.1f} ms")
+        print(f"{'Search 3 (paid_by filter)':<38} | {c3:<6} | {s3_ms:6.1f} ms")
+        print(f"{'Search 4 (amount range 50-70)':<38} | {c4:<6} | {s4_ms:6.1f} ms")
+        print(f"{'Search 5 (include_deleted)':<38} | {c5:<6} | {s5_ms:6.1f} ms")
+        print(f"{'Searches median':<38} | {'-':<6} | {searches_median:6.1f} ms")
+        print(f"{'Writes (20 real HTTP incl. conn)':<38} | {'-':<6} | {write_median:6.1f} ms")
+        print("=" * 65 + "\n")
 
         await engine.dispose()
 
     finally:
-        # 9. Clean up test room
+        # 10. Clean up test room
         print(f"Cleaning up load check room {slug}...")
         await conn.execute("DELETE FROM groups WHERE slug = $1", slug)
         await conn.close()

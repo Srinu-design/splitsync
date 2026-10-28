@@ -306,6 +306,71 @@ async def test_payload_too_large_16kb(rl_client):
     assert res_normal.status_code == 201
 
 
+async def test_payload_too_large_chunked(rl_client):
+    # Generator body produces chunked transfer encoding with no Content-Length
+    async def chunk_generator():
+        for _ in range(17):
+            yield b"x" * 1024
+
+    res = await rl_client.post(
+        "/api/rooms",
+        content=chunk_generator(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 413
+    assert res.headers["content-type"] == "application/problem+json"
+    problem = res.json()
+    assert problem["code"] == "PAYLOAD_TOO_LARGE"
+    assert problem["status"] == 413
+    assert problem["type"] == "/errors/payload-too-large"
+
+
+async def test_problem_details_for_http_exceptions(rl_client):
+    # 404 Unknown route
+    res_404 = await rl_client.get("/nonexistent/api/route/12345")
+    assert res_404.status_code == 404
+    assert res_404.headers["content-type"] == "application/problem+json"
+    prob_404 = res_404.json()
+    assert prob_404["code"] == "NOT_FOUND"
+    assert prob_404["status"] == 404
+    assert prob_404["type"] == "/errors/not-found"
+
+    # 405 Method Not Allowed (keeps Allow header)
+    res_405 = await rl_client.delete("/healthz")
+    assert res_405.status_code == 405
+    assert res_405.headers["content-type"] == "application/problem+json"
+    prob_405 = res_405.json()
+    assert prob_405["code"] == "METHOD_NOT_ALLOWED"
+    assert prob_405["status"] == 405
+    assert prob_405["type"] == "/errors/method-not-allowed"
+    assert "Allow" in res_405.headers
+
+
+async def test_head_support_on_get_endpoints(rl_client):
+    created = await rl_client.post("/api/rooms", json={"kind": "DEMO"})
+    slug = created.json()["slug"]
+
+    # 1. HEAD /
+    res_root = await rl_client.head("/")
+    assert res_root.status_code == 200
+    assert res_root.content == b""
+
+    # 2. HEAD /r/{slug}
+    res_room = await rl_client.head(f"/r/{slug}")
+    assert res_room.status_code == 200
+    assert res_room.content == b""
+
+    # 3. HEAD /healthz
+    res_healthz = await rl_client.head("/healthz")
+    assert res_healthz.status_code == 200
+    assert res_healthz.content == b""
+
+    # 4. HEAD /readyz
+    res_readyz = await rl_client.head("/readyz")
+    assert res_readyz.status_code == 200
+    assert res_readyz.content == b""
+
+
 async def test_x_request_id_and_json_logging(rl_client, caplog):
     caplog.set_level(logging.INFO, logger="splitsync.access")
 

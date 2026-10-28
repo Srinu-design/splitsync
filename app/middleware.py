@@ -51,10 +51,6 @@ def determine_outcome(status: int, headers: dict[str, str], error_code: str | No
     return None
 
 
-class PayloadTooLargeError(Exception):
-    pass
-
-
 class BodyLimitMiddleware:
     def __init__(self, app, max_body_size: int = MAX_BODY_SIZE):
         self.app = app
@@ -85,31 +81,46 @@ class BodyLimitMiddleware:
             except ValueError:
                 pass
 
-        # 2. Count streamed chunks before parsing
-        bytes_received = 0
-
-        async def limited_receive():
-            nonlocal bytes_received
+        # 2. Buffer request body up to the limit before calling the app
+        chunks = []
+        total_bytes = 0
+        while True:
             message = await receive()
             if message["type"] == "http.request":
-                body = message.get("body", b"")
-                bytes_received += len(body)
-                if bytes_received > self.max_body_size:
-                    raise PayloadTooLargeError()
-            return message
+                chunk = message.get("body", b"")
+                total_bytes += len(chunk)
+                if total_bytes > self.max_body_size:
+                    scope.setdefault("state", {})["error_code"] = "PAYLOAD_TOO_LARGE"
+                    # DECISION: Reject chunked body exceeding limit before calling the app.
+                    res = make_problem_response(
+                        413,
+                        "PAYLOAD_TOO_LARGE",
+                        "Payload Too Large",
+                        f"Request body exceeds {self.max_body_size // 1024} KB limit.",
+                    )
+                    await res(scope, receive, send)
+                    return
+                chunks.append(chunk)
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                return
 
-        try:
-            await self.app(scope, limited_receive, send)
-        except PayloadTooLargeError:
-            scope.setdefault("state", {})["error_code"] = "PAYLOAD_TOO_LARGE"
-            # DECISION: Reject body exceeding limit during streaming before JSON parsing.
-            res = make_problem_response(
-                413,
-                "PAYLOAD_TOO_LARGE",
-                "Payload Too Large",
-                f"Request body exceeds {self.max_body_size // 1024} KB limit.",
-            )
-            await res(scope, receive, send)
+        body = b"".join(chunks)
+        sent = False
+
+        async def replayed_receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {
+                    "type": "http.request",
+                    "body": body,
+                    "more_body": False,
+                }
+            return await receive()
+
+        await self.app(scope, replayed_receive, send)
 
 
 class ObservabilityMiddleware:

@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -83,14 +83,18 @@ def create_app(settings=None):
     ):
         application.include_router(router)
 
-    # DECISION: Serve static pages at / and /r/{slug} without database access;
-    # the client JS renders state or 404.
-    @application.get("/", response_class=FileResponse)
-    async def get_index():
+    # DECISION: Serve static pages at / and /r/{slug} with GET and HEAD support without
+    # database access; the client JS renders state or 404.
+    @application.api_route("/", methods=["GET", "HEAD"], response_class=FileResponse)
+    async def get_index(request: Request):
+        if request.method == "HEAD":
+            return Response(status_code=200, media_type="text/html")
         return FileResponse(str(STATIC_DIR / "index.html"), media_type="text/html")
 
-    @application.get("/r/{slug}", response_class=FileResponse)
-    async def get_room(slug: str):
+    @application.api_route("/r/{slug}", methods=["GET", "HEAD"], response_class=FileResponse)
+    async def get_room(request: Request, slug: str):
+        if request.method == "HEAD":
+            return Response(status_code=200, media_type="text/html")
         return FileResponse(str(STATIC_DIR / "room.html"), media_type="text/html")
 
     application.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

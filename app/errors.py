@@ -1,6 +1,9 @@
+from http import HTTPStatus
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class ApiError(Exception):
@@ -50,4 +53,32 @@ def register_error_handlers(app: FastAPI) -> None:
             "VALIDATION_ERROR",
             "Invalid request",
             "The request body or query failed validation.",
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        # DECISION: Framework errors return Problem Details with code NOT_FOUND /
+        # METHOD_NOT_ALLOWED / HTTP_<status>, preserving exc.headers (e.g. Allow on 405).
+        if exc.status_code == 404:
+            code = "NOT_FOUND"
+            title = "Not Found"
+        elif exc.status_code == 405:
+            code = "METHOD_NOT_ALLOWED"
+            title = "Method Not Allowed"
+        else:
+            code = f"HTTP_{exc.status_code}"
+            try:
+                title = HTTPStatus(exc.status_code).phrase
+            except ValueError:
+                title = "HTTP Error"
+
+        detail = exc.detail if exc.detail else title
+        request.state.error_code = code
+        headers = dict(exc.headers) if exc.headers else None
+        return make_problem_response(
+            exc.status_code,
+            code,
+            title,
+            detail,
+            headers=headers,
         )

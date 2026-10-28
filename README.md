@@ -97,20 +97,23 @@ PYTHONPATH=. uv run python tests/load/big_room.py
 
 Measured against the local development environment (**Linux x86_64, 13th Gen Intel Core i7-13700H, PostgreSQL 16 on Docker Compose**):
 
-| Operation | Measured Median | SPEC §12 Reference (2 vCPU) |
-| --- | --- | --- |
-| **Snapshot build (median of 5, cache bypassed)** | **0.9 ms** | 154 ms |
-| **History page (50 items)** | **25.9 ms** | 9 ms |
-| **Searches median (5 query types)** | **1.3 ms** | 10–42 ms |
-| Search: prefix `vil` | 5.8 ms | — |
-| Search: two-word `seafood din` | 2.3 ms | — |
-| Search: `paid_by` filter | 1.3 ms | — |
-| Search: amount range `50.00`–`70.00` | 0.8 ms | — |
-| Search: `include_deleted=true` | 0.8 ms | — |
-| **Writes (20 sequential via API incl. connection)** | **245.8 ms** | 22.5 ms |
-| **Database Size at maximum room caps** | **25 MB** | 17.6 MB |
+| Operation | Rows | Measured Median | SPEC §12 Reference (2 vCPU) |
+| --- | --- | --- | --- |
+| **Snapshot build (median of 5, cache cleared before each run)** | — | **276.2 ms** | 154 ms |
+| ↳ Pairwise SQL | — | 78.2 ms | — |
+| ↳ Integrity queries | — | 210.9 ms | — |
+| ↳ Python plans (greedy + exact) | — | 0.4 ms | — |
+| **History page (50 items)** | 50 | **5.1 ms** | 9 ms |
+| **Searches median (5 query types)** | 50 | **10.4 ms** | 10–42 ms |
+| Search: prefix `vil` | 50 | 16.5 ms | — |
+| Search: two-word `seafood din` | 50 | 24.6 ms | — |
+| Search: `paid_by` filter | 50 | 4.8 ms | — |
+| Search: amount range `50.00`–`70.00` | 50 | 10.4 ms | — |
+| Search: `include_deleted=true` | 50 | 9.6 ms | — |
+| **Writes (20 sequential via real HTTP against compose app)** | — | **48.0 ms** | 22.5 ms |
+| **Database Size at maximum room caps** | — | **32 MB** | 17.6 MB |
 
-All zero-sum ledger invariants (`zero_sum_paise == 0`, `drift == 0`, `bad_split_expenses == 0`, `orphan_edits == 0`) are validated throughout the benchmark.
+All zero-sum ledger invariants (`zero_sum_paise == 0`, `drift == 0`, `bad_split_expenses == 0`, `orphan_edits == 0`) are validated after data generation and after the 20 writes.
 
 ---
 
@@ -118,4 +121,4 @@ All zero-sum ledger invariants (`zero_sum_paise == 0`, `drift == 0`, `bad_split_
 
 Follow the step-by-step walkthrough to reproduce the sample trip, demonstrate concurrent race conditions, view the greedy vs. exact solvers, and test idempotency:
 
-See [Demo Script in docs/MASTER_GUIDE.md](docs/MASTER_GUIDE.md#demo-script).
+See [Live demo script (4 minutes) in docs/MASTER_GUIDE.md](docs/MASTER_GUIDE.md#live-demo-script-4-minutes).
