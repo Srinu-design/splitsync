@@ -172,7 +172,6 @@ img { height: auto; }
 .project-tabs a[aria-current], .tabs a[aria-current] { background: var(--sunset); color: #ffffff; box-shadow: 0 3px 9px rgb(145 42 25 / 18%); }
 .project-tabs a:hover, .tabs a:hover { color: var(--text); }
 .project-tabs a[aria-current]:hover, .tabs a[aria-current]:hover { color: #ffffff; }
-.project-link { display: inline-flex; align-items: center; min-height: 44px; padding-inline: 12px; color: var(--muted); font-size: 0.83rem; font-weight: 600; text-decoration: none; }
 .icon-btn, .theme-toggle, [data-theme-toggle] { display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 10px; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 .icon-btn svg, [data-theme-toggle] svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .icon-sun { display: none; }
