@@ -31,6 +31,7 @@ async def ws_server(migrated_database):
         DATABASE_URL=url,
         REDIS_URL="redis://localhost:6380/0",
         ALLOWED_ORIGINS=["http://localhost:8000"],
+        RATE_LIMIT_ENABLED=False,
         DB_POOL_SIZE=12,
         DB_MAX_OVERFLOW=0,
     )

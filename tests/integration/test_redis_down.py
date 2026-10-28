@@ -32,6 +32,7 @@ async def degraded_server(migrated_database):
         DATABASE_URL=url,
         REDIS_URL="redis://127.0.0.1:6399/0",
         ALLOWED_ORIGINS=["http://localhost:8000"],
+        RATE_LIMIT_ENABLED=False,
         DB_POOL_SIZE=12,
         DB_MAX_OVERFLOW=0,
     )

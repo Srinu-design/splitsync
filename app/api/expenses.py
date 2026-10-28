@@ -3,10 +3,11 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
 from app.api import ActingMember, TargetId, idempotency_key, response, schedule_publish
+from app.api.rate_limit import require_rate_limit
 from app.schemas import ExpenseIn
 from app.services import expenses
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_rate_limit("write"))])
 
 
 @router.post("/api/rooms/{slug}/expenses", status_code=201)

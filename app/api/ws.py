@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.api.rate_limit import check_rate_limit
 from app.errors import ApiError
 from app.services.shared import read_room
 from app.services.state import build_snapshot
@@ -37,15 +38,24 @@ async def room_websocket(websocket: WebSocket, slug: str) -> None:
 
     await websocket.accept()
 
-    # 3. Check per-worker connection limits: 20 per room, 5 per client IP -> close 1013
+    # 3. Check Redis rate limit for ws_connect (30/min per IP)
     client_ip = websocket.client.host if websocket.client else "127.0.0.1"
+    allowed, _ = await check_rate_limit(
+        websocket.app.state.redis, settings, "ws_connect", client_ip
+    )
+    if not allowed:
+        # DECISION: Close over-the-limit WebSocket connections with 1013 (Try Again Later).
+        await websocket.close(code=1013)
+        return
+
+    # 4. Check per-worker connection limits: 20 per room, 5 per client IP -> close 1013
     group_id = room["id"]
     if not manager.can_connect(group_id, client_ip):
         # DECISION: Close with 1013 when per-room or per-IP socket limits are reached.
         await websocket.close(code=1013)
         return
 
-    # 4. Register socket and send initial snapshot message
+    # 5. Register socket and send initial snapshot message
     manager.connect(group_id, client_ip, websocket)
     try:
         snapshot = await build_snapshot(engine, settings, slug)

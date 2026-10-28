@@ -10,6 +10,8 @@ from app import db
 from app.api import expenses, health, history, members, rooms, search, settlements, state, ws
 from app.config import get_settings
 from app.errors import register_error_handlers
+from app.logging import setup_logging
+from app.middleware import BodyLimitMiddleware, ObservabilityMiddleware
 from app.redis_client import make_redis
 from app.services import realtime
 from app.services import rooms as room_service
@@ -49,7 +51,11 @@ def create_app(settings=None):
     # Pre-initialize manager and redis on state for tests that don't invoke lifespan
     application.state.manager = ConnectionManager(application.state.settings)
     application.state.redis = make_redis(application.state.settings.REDIS_URL)
+    setup_logging(application.state.settings.LOG_LEVEL)
     register_error_handlers(application)
+
+    application.add_middleware(BodyLimitMiddleware)
+    application.add_middleware(ObservabilityMiddleware)
 
     # DECISION: Middleware adds CSP, X-Content-Type-Options, and Referrer-Policy to every HTTP
     # response because the shared host's proxy does not add them.

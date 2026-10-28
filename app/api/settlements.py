@@ -3,10 +3,11 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
 from app.api import ActingMember, TargetId, idempotency_key, response, schedule_publish
+from app.api.rate_limit import enforce_rate_limit, require_rate_limit
 from app.schemas import SettlementIn
 from app.services import settlements
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_rate_limit("write"))])
 
 
 @router.post("/api/rooms/{slug}/settlements", status_code=201)
@@ -18,6 +19,8 @@ async def create(
     key: Annotated[str, Depends(idempotency_key)],
     acted_by: ActingMember = None,
 ):
+    if body.mode == "NAIVE":
+        await enforce_rate_limit(request, "naive")
     res = await settlements.create(
         request.app.state.engine, request.app.state.settings, slug, body, key, acted_by
     )

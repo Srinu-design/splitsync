@@ -113,6 +113,7 @@ async def app(engine, migrated_database):
         _env_file=None,
         DATABASE_URL=url,
         REDIS_URL="redis://localhost:6380/0",
+        RATE_LIMIT_ENABLED=False,
         DB_POOL_SIZE=12,
         DB_MAX_OVERFLOW=0,
     )

@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -14,11 +15,20 @@ end
 return 0
 """
 
+# DECISION: Rate limit Lua script from SPEC §14 table (Redis fixed window, returns count).
+RATE_LIMIT_LUA = """-- rate_limit.lua
+-- KEYS[1] = rl:{scope}:{ip}:{window_start}, ARGV[1] = window ms; returns count
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
+return n
+"""
+
 
 class RedisClient:
     def __init__(self, client: aioredis.Redis):
         self.client = client
         self._release_script = client.register_script(RELEASE_LOCK_LUA)
+        self._rate_limit_script = client.register_script(RATE_LIMIT_LUA)
 
     async def aclose(self) -> None:
         try:
@@ -75,6 +85,24 @@ class RedisClient:
         except (RedisError, OSError, TimeoutError) as exc:
             logger.warning("Redis set failed on %s: %s", key, exc)
             return False
+
+    async def check_rate_limit(
+        self, scope: str, ip: str, limit: int, window_seconds: int
+    ) -> tuple[bool, int]:
+        now = int(time.time())
+        window_start = (now // window_seconds) * window_seconds
+        key = f"rl:{scope}:{ip}:{window_start}"
+        window_ms = window_seconds * 1000
+        retry_after = max(1, (window_start + window_seconds) - now)
+        try:
+            count = await self._rate_limit_script(keys=[key], args=[window_ms])
+            if count > limit:
+                return False, retry_after
+            return True, retry_after
+        except (RedisError, OSError, TimeoutError) as exc:
+            logger.warning("Redis rate limit check failed on %s: %s", key, exc)
+            # DECISION: Fail open when Redis is unavailable so requests succeed without limits.
+            return True, 0
 
 
 def make_redis(url: str) -> RedisClient:

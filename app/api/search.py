@@ -1,10 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
+from app.api.rate_limit import require_rate_limit
 from app.services import search
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_rate_limit("read"))])
 
 
 @router.get("/api/rooms/{slug}/expenses")
