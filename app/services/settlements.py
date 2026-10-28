@@ -4,7 +4,7 @@ import json
 from sqlalchemy import text
 
 from app.db import write_tx
-from app.domain.ledger import settlement_deltas
+from app.domain.ledger import negate, settlement_deltas
 from app.errors import ApiError
 from app.services.shared import (
     WriteResult,
@@ -183,3 +183,77 @@ async def create(engine, settings, slug, body, key, acted_by=None):
             {"gid": gid},
         )
     return result
+
+
+async def delete(engine, settings, slug, settlement_id, key, acted_by=None):
+    request_hash = payload_hash("delete-settlement", slug, settlement_id)
+
+    async def operation(connection):
+        room = await lock_room(connection, slug)
+        replay = await lookup_idempotency(connection, room["id"], key, request_hash)
+        if replay is not None:
+            if acted_by is not None:
+                await validate_members(connection, room["id"], {acted_by})
+            return replay
+        target = (
+            (
+                await connection.execute(
+                    text("""
+            SELECT s.*, r.id AS reversal_id FROM settlements s
+            LEFT JOIN reversals r ON r.settlement_id = s.id
+            WHERE s.group_id = :gid AND s.id = :sid
+        """),
+                    {"gid": room["id"], "sid": settlement_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if target is None:
+            raise ApiError(
+                404,
+                "SETTLEMENT_NOT_FOUND",
+                "Settlement not found",
+                "This settlement does not exist in this room.",
+            )
+        if target["reversal_id"] is not None:
+            raise ApiError(
+                409,
+                "SETTLEMENT_ALREADY_DELETED",
+                "Settlement already deleted",
+                "This settlement has already been reversed.",
+            )
+        if acted_by is not None:
+            await validate_members(connection, room["id"], {acted_by})
+        version = await bump(connection, room, settings)
+        result = {"deleted_settlement_id": settlement_id, "graph_version": version}
+        await connection.execute(
+            text("""
+            INSERT INTO reversals
+                (group_id, version, settlement_id, reason, acted_by,
+                 idempotency_key, payload_hash, response_json)
+            VALUES (:gid, :version, :target, 'DELETE', :actor, :key, :hash,
+                    CAST(:response AS jsonb))
+        """),
+            {
+                "gid": room["id"],
+                "version": version,
+                "target": settlement_id,
+                "actor": acted_by,
+                "key": key,
+                "hash": request_hash,
+                "response": json.dumps(result),
+            },
+        )
+        await apply_deltas(
+            connection,
+            room["id"],
+            negate(
+                settlement_deltas(
+                    target["from_member"], target["to_member"], target["amount_paise"]
+                )
+            ),
+        )
+        return WriteResult(result, 200)
+
+    return await write_tx(engine, operation)

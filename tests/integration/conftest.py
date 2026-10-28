@@ -89,6 +89,22 @@ ORDER BY m.id;
 """
 
 
+BAD_SPLITS_SQL = """-- 2. versions whose splits don't add up (must be 0)
+SELECT count(*) FROM (
+  SELECT e.id FROM expenses e LEFT JOIN expense_splits s ON s.expense_id = e.id
+  WHERE e.group_id = :gid
+  GROUP BY e.id, e.total_paise
+  HAVING COALESCE(sum(s.share_paise), 0) <> e.total_paise) x;
+
+"""
+
+ORPHAN_EDITS_SQL = """-- 3. edit reversals without their new version (must be 0)
+SELECT count(*) FROM reversals r
+WHERE r.group_id = :gid AND r.reason = 'EDIT'
+  AND NOT EXISTS (SELECT 1 FROM expenses n WHERE n.revision_of = r.expense_id AND n.version = r.version);
+"""
+
+
 @pytest.fixture
 async def app(engine, migrated_database):
     url, _ = migrated_database
@@ -115,7 +131,11 @@ async def integrity(engine):
                 text("SELECT id FROM groups WHERE slug=:slug"), {"slug": slug}
             )
             rows = (await connection.execute(text(INTEGRITY_SQL), {"gid": gid})).all()
+            bad_splits = await connection.scalar(text(BAD_SPLITS_SQL), {"gid": gid})
+            orphan_edits = await connection.scalar(text(ORPHAN_EDITS_SQL), {"gid": gid})
         return {
+            "bad_split_expenses": bad_splits,
+            "orphan_edits": orphan_edits,
             "zero_sum_paise": sum(cached for _, cached, _ in rows),
             "drift": {member: cached - ledger for member, cached, ledger in rows},
             "cached": {member: cached for member, cached, _ in rows},
@@ -129,11 +149,12 @@ async def integrity(engine):
 async def client(app, engine, integrity, request):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
-    if request.node.get_closest_marker("naive_drift") is None:
-        async with engine.connect() as connection:
-            slugs = list(await connection.scalars(text("SELECT slug FROM groups")))
-        for slug in slugs:
-            report = await integrity(slug)
+    async with engine.connect() as connection:
+        slugs = list(await connection.scalars(text("SELECT slug FROM groups")))
+    for slug in slugs:
+        report = await integrity(slug)
+        assert report["bad_split_expenses"] == report["orphan_edits"] == 0, report
+        if request.node.get_closest_marker("naive_drift") is None:
             assert report["zero_sum_paise"] == 0, report
             assert all(drift == 0 for drift in report["drift"].values()), report
 

@@ -1,12 +1,13 @@
 import re
 from typing import Annotated
 
-from fastapi import Header
+from fastapi import Header, Path
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError
 
 ActingMember = Annotated[int | None, Header(alias="X-Acting-Member", ge=1, le=2**63 - 1)]
+TargetId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
 def idempotency_key(value: Annotated[str | None, Header(alias="Idempotency-Key")] = None) -> str:
