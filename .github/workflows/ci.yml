@@ -1,0 +1,46 @@
+name: ci
+
+# Lint, unit + integration tests against production's Postgres and Redis builds, then the
+# two-worker WebSocket fan-out test against the real image. deploy.yml runs after a green push.
+on:
+  push: { branches: [main] }
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Same ports and password as docker-compose.yml, which the integration tests default to.
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16-trixie   # production's build
+        env: { POSTGRES_PASSWORD: dev, POSTGRES_DB: splitsync_test }
+        ports: ["5433:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7.4.11                           # production's build
+        ports: ["6380:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:dev@localhost:5433/splitsync_test
+      REDIS_URL: redis://localhost:6380/0
+      RATE_LIMIT_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked
+      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run pytest tests/unit tests/integration -q
+
+  e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: docker compose up -d --build --wait
+      - run: uv sync --locked && uv run pytest tests/e2e -q
+      - if: failure()
+        run: docker compose logs --tail 200
