@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import re
 from collections import Counter
@@ -492,8 +493,19 @@ def test_service_sql_keeps_the_ledger_append_only():
         re.IGNORECASE,
     )
     services = Path(__file__).resolve().parents[2] / "app" / "services"
+    allow_delete = {("rooms.py", "reset")}
     for path in sorted(services.glob("*.py")):
-        assert forbidden.search(path.read_text()) is None, path.name
+        source = path.read_text()
+        allowed = [
+            (node.lineno, node.end_lineno)
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.AsyncFunctionDef) and (path.name, node.name) in allow_delete
+        ]
+        for match in forbidden.finditer(source):
+            line = source[: match.start()].count("\n") + 1
+            assert match.group().upper().startswith("DELETE") and any(
+                first <= line <= last for first, last in allowed
+            ), (path.name, line)
 
 
 @pytest.mark.parametrize("operation", ["edit", "delete", "restore", "delete-settlement"])

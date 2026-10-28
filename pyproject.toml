@@ -38,6 +38,10 @@ select = ["E", "F", "I", "B", "UP"]
 "migrations/versions/0001_initial.py" = ["E501"]
 # DECISION: Preserve the spec's ledger integrity SQL verbatim in the integration helper.
 "tests/integration/conftest.py" = ["E501"]
+# DECISION: Preserve long lines in the spec's snapshot, history and search SQL literals.
+"app/services/state.py" = ["E501"]
+"app/services/history.py" = ["E501"]
+"app/services/search.py" = ["E501"]
 
 [tool.ruff.format]
 # DECISION: Preserve formatting in the four verbatim blocks and their source spec.

@@ -14,6 +14,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import Settings
 from app.main import create_app
+from app.services.state import build_snapshot
 
 
 @pytest.fixture(scope="session")
@@ -150,13 +151,22 @@ async def client(app, engine, integrity, request):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
     async with engine.connect() as connection:
-        slugs = list(await connection.scalars(text("SELECT slug FROM groups")))
-    for slug in slugs:
+        rooms = (
+            await connection.execute(text("SELECT slug, expires_at > now() FROM groups"))
+        ).all()
+    for slug, active in rooms:
         report = await integrity(slug)
         assert report["bad_split_expenses"] == report["orphan_edits"] == 0, report
+        if active:
+            snapshot = await build_snapshot(app.state.engine, app.state.settings, slug)
+            invariants = snapshot["invariants"]
+            assert invariants["bad_split_expenses"] == invariants["orphan_edits"] == 0
         if request.node.get_closest_marker("naive_drift") is None:
             assert report["zero_sum_paise"] == 0, report
             assert all(drift == 0 for drift in report["drift"].values()), report
+            if active:
+                assert invariants["zero_sum_paise"] == invariants["ledger_drift_total_paise"] == 0
+                assert invariants["drifted_members"] == []
 
 
 @pytest.fixture

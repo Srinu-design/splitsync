@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from datetime import timedelta
 from typing import NamedTuple
 
@@ -35,12 +36,38 @@ def ttl(kind, settings):
 
 
 async def lock_room(connection, slug):
+    check_slug(slug)
     room = (
         (
             await connection.execute(
                 text("""
         SELECT id, kind, graph_version FROM groups
         WHERE slug = :slug AND expires_at > now() FOR UPDATE
+    """),
+                {"slug": slug},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if room is None:
+        raise ApiError(404, "ROOM_NOT_FOUND", "Room not found", "The room is missing or expired.")
+    return dict(room)
+
+
+def check_slug(slug):
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,32}", slug) is None:
+        raise ApiError(404, "ROOM_NOT_FOUND", "Room not found", "The room is missing or expired.")
+
+
+async def read_room(connection, slug):
+    check_slug(slug)
+    room = (
+        (
+            await connection.execute(
+                text("""
+        SELECT id, slug, kind, name, graph_version, expires_at FROM groups
+        WHERE slug = :slug AND expires_at > now()
     """),
                 {"slug": slug},
             )

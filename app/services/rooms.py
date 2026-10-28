@@ -10,7 +10,8 @@ from app.errors import ApiError
 from app.schemas import ExpenseIn
 from app.seed_data import EXPENSES, MEMBERS, ROOM_NAME
 from app.services.expenses import add_expense
-from app.services.shared import WriteResult, room_limit, ttl, validate_members
+from app.services.shared import WriteResult, bump, lock_room, room_limit, ttl, validate_members
+from app.services.state import build_snapshot
 
 # DECISION: Group members cycle through the same fixed five colors as the demo seed.
 PALETTE = [color for _, color in MEMBERS]
@@ -59,16 +60,8 @@ async def create(engine, settings, body, acted_by=None):
         names = [name for name, _ in MEMBERS] if body.kind == "DEMO" else body.members
         if body.kind == "GROUP" and len(names) > settings.GROUP_LIMITS.members:
             room_limit("members")
-        ids = {}
         try:
-            for index, name in enumerate(names):
-                ids[name] = await connection.scalar(
-                    text("""
-                    INSERT INTO members (group_id, version, name, color)
-                    VALUES (:gid, 1, :name, :color) RETURNING id
-                """),
-                    {"gid": gid, "name": name, "color": PALETTE[index % len(PALETTE)]},
-                )
+            ids = await insert_members(connection, gid, names, 1)
         except IntegrityError as error:
             # DECISION: PostgreSQL owns name uniqueness when Unicode case folding differs.
             if body.kind != "GROUP" or getattr(error.orig, "sqlstate", None) != "23505":
@@ -82,28 +75,67 @@ async def create(engine, settings, body, acted_by=None):
         if acted_by is not None:
             await validate_members(connection, gid, {acted_by})
         if body.kind == "DEMO":
-            today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-            for index, (title, payer, total, split_type, participants, weights, days) in enumerate(
-                EXPENSES, start=1
-            ):
-                split_members = []
-                for position, name in enumerate(participants):
-                    member = {"id": ids[name]}
-                    if split_type == "SHARES":
-                        member["weight"] = weights[position]
-                    elif split_type == "EXACT":
-                        member["amount"] = f"{weights[name] // 100}.{weights[name] % 100:02d}"
-                    split_members.append(member)
-                expense = ExpenseIn(
-                    title=title,
-                    paid_by=ids[payer],
-                    amount=f"{total // 100}.{total % 100:02d}",
-                    spent_on=today - timedelta(days=days),
-                    split={"type": split_type, "members": split_members},
-                )
-                await add_expense(
-                    connection, settings, slug, expense, f"seed-expense-{index:016d}", acted_by
-                )
+            await seed_expenses(connection, settings, slug, ids, acted_by)
         return WriteResult({"slug": slug, "url": f"/r/{slug}", "kind": body.kind})
 
     return await write_tx(engine, operation)
+
+
+async def insert_members(connection, gid, names, version):
+    ids = {}
+    for index, name in enumerate(names):
+        ids[name] = await connection.scalar(
+            text("""
+            INSERT INTO members (group_id, version, name, color)
+            VALUES (:gid, :version, :name, :color) RETURNING id
+        """),
+            {"gid": gid, "version": version, "name": name, "color": PALETTE[index % len(PALETTE)]},
+        )
+    return ids
+
+
+async def seed_expenses(connection, settings, slug, ids, acted_by=None):
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    for index, (title, payer, total, split_type, participants, weights, days) in enumerate(
+        EXPENSES, start=1
+    ):
+        split_members = []
+        for position, name in enumerate(participants):
+            member = {"id": ids[name]}
+            if split_type == "SHARES":
+                member["weight"] = weights[position]
+            elif split_type == "EXACT":
+                member["amount"] = f"{weights[name] // 100}.{weights[name] % 100:02d}"
+            split_members.append(member)
+        expense = ExpenseIn(
+            title=title,
+            paid_by=ids[payer],
+            amount=f"{total // 100}.{total % 100:02d}",
+            spent_on=today - timedelta(days=days),
+            split={"type": split_type, "members": split_members},
+        )
+        await add_expense(
+            connection, settings, slug, expense, f"seed-expense-{index:016d}", acted_by
+        )
+
+
+async def reset(engine, settings, slug, acted_by=None):
+    async def operation(connection):
+        room = await lock_room(connection, slug)
+        if room["kind"] != "DEMO":
+            raise ApiError(
+                403, "RESET_NOT_ALLOWED", "Reset not allowed", "Only demo rooms can reset."
+            )
+        if acted_by is not None:
+            await validate_members(connection, room["id"], {acted_by})
+        version = await bump(connection, room, settings)
+        params = {"gid": room["id"]}
+        await connection.execute(text("DELETE FROM settlements WHERE group_id=:gid"), params)
+        await connection.execute(text("DELETE FROM expenses WHERE group_id=:gid"), params)
+        await connection.execute(text("DELETE FROM members WHERE group_id=:gid"), params)
+        ids = await insert_members(connection, room["id"], [name for name, _ in MEMBERS], version)
+        # DECISION: Validate the old actor, then seed with NULL because reset removes those IDs.
+        await seed_expenses(connection, settings, slug, ids)
+
+    await write_tx(engine, operation)
+    return await build_snapshot(engine, settings, slug)

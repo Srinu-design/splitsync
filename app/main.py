@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import db
-from app.api import expenses, members, rooms, settlements
+from app.api import expenses, history, members, rooms, search, settlements, state
 from app.config import get_settings
 from app.errors import register_error_handlers
 
@@ -21,7 +21,15 @@ def create_app(settings=None):
     application.state.settings = settings if settings is not None else get_settings()
     application.state.engine = db.make_engine(settings) if settings is not None else db.engine
     register_error_handlers(application)
-    for router in (rooms.router, members.router, expenses.router, settlements.router):
+    for router in (
+        rooms.router,
+        members.router,
+        expenses.router,
+        settlements.router,
+        state.router,
+        history.router,
+        search.router,
+    ):
         application.include_router(router)
     return application
 
