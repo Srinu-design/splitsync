@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SplitSync — Zero-Drift Shared Expenses</title>
+  <meta name="description" content="Mathematically verified shared expenses with real-time settlement simplification and zero ledger drift.">
+  <link rel="stylesheet" href="static/styles.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body id="landing-page">
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <h1 class="brand-title">SplitSync</h1>
+        <span class="brand-tagline">Zero-drift expense sharing</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero-section">
+      <p class="hero-desc">
+        A mathematically verified shared expense app with zero ledger drift, real-time settlement simplification, and instant replay idempotency.
+      </p>
+      <div class="hero-actions">
+        <button type="button" id="start-demo-btn" class="btn btn-primary btn-large">Start demo</button>
+      </div>
+    </section>
+
+    <div class="grid-two-col">
+      <section class="card">
+        <h2 class="card-title">Create a group</h2>
+        <form id="create-group-form" class="form-stack">
+          <div class="form-group">
+            <label for="group-name-input">Group name</label>
+            <input type="text" id="group-name-input" class="form-input" placeholder="e.g. Flat 4B" required maxlength="100">
+          </div>
+          <div class="form-group">
+            <label for="group-members-input">Members (one per line, 2–50)</label>
+            <textarea id="group-members-input" class="form-textarea" rows="6" placeholder="Asha&#10;Ravi&#10;Meera" required></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="create-group-btn" class="btn btn-primary">Create group</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">My groups</h2>
+        <div id="my-groups-container">
+          <p id="no-groups-msg" class="text-muted">No groups visited on this device yet.</p>
+          <ul id="my-groups-list" class="rooms-list"></ul>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

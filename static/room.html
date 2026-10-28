@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SplitSync — Room</title>
+  <meta name="description" content="SplitSync room details, balances, settlement plan and live expenses.">
+  <link rel="stylesheet" href="../static/styles.css">
+  <script src="../static/graph.js" defer></script>
+  <script src="../static/app.js" defer></script>
+</head>
+<body id="room-page">
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- Fallback dialog for Copy Link on plain HTTP -->
+  <div id="copy-fallback-dialog" class="dialog-backdrop hidden">
+    <div class="dialog-box">
+      <h3 class="dialog-title">Copy Room Link</h3>
+      <p class="dialog-desc">Press Ctrl+C to copy:</p>
+      <input type="text" id="copy-link-input" class="form-input" readonly>
+      <div class="dialog-actions">
+        <button type="button" id="copy-fallback-close-btn" class="btn btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 1. Status Bar -->
+  <header class="status-bar">
+    <div class="status-bar-inner">
+      <div class="status-left">
+        <a id="home-link" class="home-link" href="../">← Home</a>
+        <h1 id="room-title" class="room-title">Loading…</h1>
+        <span id="room-kind-badge" class="badge">Loading</span>
+        <span id="room-version-badge" class="badge">v0</span>
+        <span id="sigma-badge" class="badge badge-success">Σ ₹0.00</span>
+        <span id="drift-badge" class="badge badge-success">Drift: ₹0.00</span>
+      </div>
+      <div class="status-right">
+        <span id="connection-pill" class="pill pill-reconnecting">Reconnecting</span>
+        <button type="button" id="copy-link-btn" class="btn btn-sm">Copy link</button>
+        <div class="acting-member-wrap">
+          <label for="acting-member-picker" class="sr-only">I am</label>
+          <select id="acting-member-picker" class="form-select form-select-sm">
+            <option value="">I am: Someone</option>
+          </select>
+        </div>
+        <button type="button" id="reset-room-btn" class="btn btn-sm btn-outline-danger hidden">Reset room</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container room-container">
+    <div id="room-not-found-msg" class="alert alert-danger hidden">
+      <h2>Room not found</h2>
+      <p>This room does not exist or has expired.</p>
+      <a id="not-found-home-link" class="btn btn-primary" href="../">Go to Home</a>
+    </div>
+
+    <div id="room-content" class="room-content">
+      <!-- 2. Graphs Section -->
+      <section class="card graph-card">
+        <div class="card-header-flex">
+          <h2 class="card-title">Settlement Graphs</h2>
+          <div id="graph-controls" class="btn-group">
+            <button type="button" id="toggle-optimal-btn" class="btn btn-sm btn-primary">Optimal</button>
+            <button type="button" id="toggle-greedy-btn" class="btn btn-sm btn-secondary">Greedy</button>
+          </div>
+        </div>
+
+        <p id="graph-summary-line" class="text-muted graph-summary"></p>
+        <p id="greedy-fallback-note" class="alert alert-warning hidden"></p>
+
+        <!-- SVG Visualizer (up to 15 members) -->
+        <div id="graph-svg-container" class="graph-grid">
+          <div class="graph-column">
+            <h3 class="graph-subtitle">IOUs as incurred</h3>
+            <div id="pairwise-svg-wrap" class="svg-wrap"></div>
+          </div>
+          <div class="graph-column">
+            <h3 class="graph-subtitle">Plan</h3>
+            <div id="plan-svg-wrap" class="svg-wrap"></div>
+          </div>
+        </div>
+
+        <!-- List mode (above 15 members) -->
+        <div id="graph-list-container" class="grid-two-col hidden">
+          <div class="panel">
+            <h3 class="graph-subtitle">Largest IOUs</h3>
+            <ul id="large-ious-list" class="transfers-list"></ul>
+          </div>
+          <div class="panel">
+            <h3 class="graph-subtitle">Plan Transfers</h3>
+            <ul id="large-plan-list" class="transfers-list"></ul>
+          </div>
+        </div>
+
+        <!-- Steps / Groups Details Drawer -->
+        <details id="plan-details-drawer" class="plan-drawer">
+          <summary id="plan-details-summary" class="drawer-summary">View plan details</summary>
+          <div id="plan-details-content" class="drawer-content"></div>
+        </details>
+      </section>
+
+      <!-- 3. Balances -->
+      <section class="card">
+        <h2 class="card-title">Balances</h2>
+        <div id="balances-list" class="balances-grid"></div>
+      </section>
+
+      <!-- 4. Expenses & 5. Add / Edit Expense Form -->
+      <div class="grid-two-col">
+        <!-- Expenses List -->
+        <section class="card">
+          <div class="card-header-flex">
+            <h2 class="card-title">Expenses</h2>
+            <button type="button" id="open-search-btn" class="btn btn-sm">Search</button>
+          </div>
+          <ul id="expenses-list" class="items-list"></ul>
+        </section>
+
+        <!-- Add / Edit Expense Form -->
+        <section class="card">
+          <h2 id="expense-form-title" class="card-title">Add Expense</h2>
+          <form id="expense-form" class="form-stack">
+            <input type="hidden" id="editing-expense-id" value="">
+            <div class="form-group">
+              <label for="expense-title-input">Title</label>
+              <input type="text" id="expense-title-input" class="form-input" placeholder="e.g. Dinner" required maxlength="100">
+            </div>
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label for="expense-amount-input">Amount (₹)</label>
+                <input type="text" id="expense-amount-input" class="form-input" placeholder="100.00" required>
+              </div>
+              <div class="form-group flex-1">
+                <label for="expense-payer-select">Paid by</label>
+                <select id="expense-payer-select" class="form-select" required></select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="expense-date-input">Date</label>
+              <input type="date" id="expense-date-input" class="form-input">
+            </div>
+
+            <fieldset class="form-fieldset">
+              <legend class="fieldset-legend">Split type</legend>
+              <div class="radio-group">
+                <label class="radio-label">
+                  <input type="radio" name="split-type" id="split-type-equal" value="EQUAL" checked> Equal
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="split-type" id="split-type-shares" value="SHARES"> Shares
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="split-type" id="split-type-exact" value="EXACT"> Exact
+                </label>
+              </div>
+            </fieldset>
+
+            <div class="form-group">
+              <label class="form-label-sub">Split members</label>
+              <div id="split-members-list" class="split-members-container"></div>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" id="expense-submit-btn" class="btn btn-primary">Add expense</button>
+              <button type="button" id="expense-cancel-btn" class="btn btn-secondary hidden">Cancel</button>
+              <button type="button" id="demo-shortcut-btn" class="btn btn-outline-primary hidden">Add ₹100 split 3 ways</button>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <!-- 6. Record Settlement -->
+      <section class="card">
+        <h2 class="card-title">Record Settlement</h2>
+        <form id="settlement-form" class="form-row form-wrap">
+          <div class="form-group flex-1">
+            <label for="settlement-from-select">From</label>
+            <select id="settlement-from-select" class="form-select" required></select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settlement-to-select">To</label>
+            <select id="settlement-to-select" class="form-select" required></select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settlement-amount-input">Amount (₹)</label>
+            <input type="text" id="settlement-amount-input" class="form-input" placeholder="0.00" required>
+          </div>
+          <div class="form-actions-align">
+            <button type="submit" id="record-settlement-btn" class="btn btn-primary">Record settlement</button>
+          </div>
+        </form>
+
+        <h3 class="section-subtitle">Settlement History</h3>
+        <ul id="settlements-list" class="items-list"></ul>
+      </section>
+
+      <!-- 8. Search Panel -->
+      <section id="search-panel" class="card search-panel hidden">
+        <div class="card-header-flex">
+          <h2 class="card-title">Search Expenses</h2>
+          <button type="button" id="close-search-btn" class="btn btn-sm btn-secondary">Close</button>
+        </div>
+        <div class="form-stack">
+          <div class="form-group">
+            <label for="search-query-input">Query</label>
+            <input type="text" id="search-query-input" class="form-input" placeholder="Search by title…">
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="search-paid-by-select">Paid by</label>
+              <select id="search-paid-by-select" class="form-select">
+                <option value="">Any payer</option>
+              </select>
+            </div>
+            <div class="form-group flex-1">
+              <label for="search-involving-select">Involving member</label>
+              <select id="search-involving-select" class="form-select">
+                <option value="">Any member</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="search-min-amount-input">Min amount (₹)</label>
+              <input type="text" id="search-min-amount-input" class="form-input" placeholder="Min">
+            </div>
+            <div class="form-group flex-1">
+              <label for="search-max-amount-input">Max amount (₹)</label>
+              <input type="text" id="search-max-amount-input" class="form-input" placeholder="Max">
+            </div>
+            <div class="form-group flex-1">
+              <label for="search-date-from-input">From date</label>
+              <input type="date" id="search-date-from-input" class="form-input">
+            </div>
+            <div class="form-group flex-1">
+              <label for="search-date-to-input">To date</label>
+              <input type="date" id="search-date-to-input" class="form-input">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="search-include-deleted"> Show deleted expenses
+            </label>
+          </div>
+        </div>
+        <ul id="search-results-list" class="items-list"></ul>
+        <div class="pagination-actions">
+          <button type="button" id="search-load-more-btn" class="btn btn-secondary hidden">Load more</button>
+        </div>
+      </section>
+
+      <!-- 7. History Drawer -->
+      <section id="history-drawer" class="card history-card">
+        <div class="card-header-flex">
+          <h2 class="card-title">Activity Feed</h2>
+          <div class="drawer-header-actions">
+            <button type="button" id="clear-lineage-filter-btn" class="btn btn-sm btn-secondary hidden">Clear lineage filter</button>
+          </div>
+        </div>
+        <ul id="history-feed-list" class="items-list"></ul>
+        <div class="pagination-actions">
+          <button type="button" id="history-load-more-btn" class="btn btn-secondary hidden">Load more</button>
+        </div>
+      </section>
+
+      <!-- 9. Chaos Panel (Demo Rooms Only) -->
+      <section id="chaos-panel" class="card chaos-card hidden">
+        <h2 class="card-title">Concurrency &amp; Chaos Demo</h2>
+        <p class="text-muted">
+          Fire 10 concurrent settlement requests in the same tick against the current target.
+        </p>
+        <div class="form-row form-wrap">
+          <fieldset class="form-fieldset flex-1">
+            <legend class="fieldset-legend">Mode</legend>
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" name="chaos-mode" id="chaos-mode-protected" value="PROTECTED" checked> Protected
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="chaos-mode" id="chaos-mode-naive" value="NAIVE"> Naive
+              </label>
+            </div>
+          </fieldset>
+          <fieldset class="form-fieldset flex-1">
+            <legend class="fieldset-legend">Scenario</legend>
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" name="chaos-scenario" id="chaos-scenario-devices" value="DEVICES" checked> 10 devices (10 keys)
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="chaos-scenario" id="chaos-scenario-replay" value="REPLAY"> Same request × 10 (1 key)
+              </label>
+            </div>
+          </fieldset>
+          <div class="form-actions-align">
+            <button type="button" id="chaos-run-btn" class="btn btn-danger">Run Chaos</button>
+          </div>
+        </div>
+
+        <div id="chaos-target-info" class="chaos-target-info text-muted"></div>
+        <div id="chaos-summary" class="chaos-summary"></div>
+        <div class="table-responsive">
+          <table id="chaos-log-table" class="data-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Status</th>
+                <th>Code</th>
+                <th>Latency (ms)</th>
+                <th>Receipt ID</th>
+              </tr>
+            </thead>
+            <tbody id="chaos-log-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,7 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import db
 from app.api import expenses, health, history, members, rooms, search, settlements, state, ws
@@ -11,6 +14,8 @@ from app.redis_client import make_redis
 from app.services import realtime
 from app.services import rooms as room_service
 from app.services.realtime import ConnectionManager
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 @asynccontextmanager
@@ -45,6 +50,20 @@ def create_app(settings=None):
     application.state.manager = ConnectionManager(application.state.settings)
     application.state.redis = make_redis(application.state.settings.REDIS_URL)
     register_error_handlers(application)
+
+    # DECISION: Middleware adds CSP, X-Content-Type-Options, and Referrer-Policy to every HTTP
+    # response because the shared host's proxy does not add them.
+    @application.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+            "style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        return response
+
     for router in (
         rooms.router,
         members.router,
@@ -57,6 +76,19 @@ def create_app(settings=None):
         health.router,
     ):
         application.include_router(router)
+
+    # DECISION: Serve static pages at / and /r/{slug} without database access;
+    # the client JS renders state or 404.
+    @application.get("/", response_class=FileResponse)
+    async def get_index():
+        return FileResponse(str(STATIC_DIR / "index.html"), media_type="text/html")
+
+    @application.get("/r/{slug}", response_class=FileResponse)
+    async def get_room(slug: str):
+        return FileResponse(str(STATIC_DIR / "room.html"), media_type="text/html")
+
+    application.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
     return application
 
 
