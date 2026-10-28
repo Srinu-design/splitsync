@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import sys
@@ -5,10 +6,14 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+
+from app.config import Settings
+from app.main import create_app
 
 
 @pytest.fixture(scope="session")
@@ -54,3 +59,100 @@ async def engine(migrated_database):
                 await connection.execute(text("TRUNCATE groups RESTART IDENTITY CASCADE"))
         finally:
             await engine.dispose()
+
+
+INTEGRITY_SQL = """-- 1. cached vs ledger, per member
+WITH paid AS (
+  SELECT paid_by AS member_id, sum(total_paise)::bigint AS amt
+  FROM active_expenses WHERE group_id = :gid GROUP BY paid_by
+), owed AS (
+  SELECT s.member_id, sum(s.share_paise)::bigint AS amt
+  FROM expense_splits s JOIN active_expenses e ON e.id = s.expense_id
+  WHERE s.group_id = :gid GROUP BY s.member_id
+), sent AS (
+  SELECT from_member AS member_id, sum(amount_paise)::bigint AS amt
+  FROM active_settlements WHERE group_id = :gid GROUP BY from_member
+), recv AS (
+  SELECT to_member AS member_id, sum(amount_paise)::bigint AS amt
+  FROM active_settlements WHERE group_id = :gid GROUP BY to_member
+)
+SELECT m.id, m.net_balance_paise AS cached,
+       COALESCE(paid.amt, 0) - COALESCE(owed.amt, 0) + COALESCE(sent.amt, 0) - COALESCE(recv.amt, 0) AS ledger
+FROM members m
+LEFT JOIN paid ON paid.member_id = m.id
+LEFT JOIN owed ON owed.member_id = m.id
+LEFT JOIN sent ON sent.member_id = m.id
+LEFT JOIN recv ON recv.member_id = m.id
+WHERE m.group_id = :gid
+ORDER BY m.id;
+
+"""
+
+
+@pytest.fixture
+async def app(engine, migrated_database):
+    url, _ = migrated_database
+    settings = Settings(
+        _env_file=None,
+        DATABASE_URL=url,
+        REDIS_URL="redis://localhost:6380/0",
+        DB_POOL_SIZE=12,
+        DB_MAX_OVERFLOW=0,
+    )
+    application = create_app(settings)
+    async with application.router.lifespan_context(application):
+        # DECISION: Prewarm the real pool so ten naive reads overlap within the specified 150 ms.
+        connections = await asyncio.gather(*(application.state.engine.connect() for _ in range(12)))
+        await asyncio.gather(*(connection.close() for connection in connections))
+        yield application
+
+
+@pytest.fixture
+async def integrity(engine):
+    async def report(slug):
+        async with engine.connect() as connection:
+            gid = await connection.scalar(
+                text("SELECT id FROM groups WHERE slug=:slug"), {"slug": slug}
+            )
+            rows = (await connection.execute(text(INTEGRITY_SQL), {"gid": gid})).all()
+        return {
+            "zero_sum_paise": sum(cached for _, cached, _ in rows),
+            "drift": {member: cached - ledger for member, cached, ledger in rows},
+            "cached": {member: cached for member, cached, _ in rows},
+            "ledger": {member: ledger for member, _, ledger in rows},
+        }
+
+    return report
+
+
+@pytest.fixture
+async def client(app, engine, integrity, request):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        yield client
+    if request.node.get_closest_marker("naive_drift") is None:
+        async with engine.connect() as connection:
+            slugs = list(await connection.scalars(text("SELECT slug FROM groups")))
+        for slug in slugs:
+            report = await integrity(slug)
+            assert report["zero_sum_paise"] == 0, report
+            assert all(drift == 0 for drift in report["drift"].values()), report
+
+
+@pytest.fixture
+async def demo(client, engine):
+    response = await client.post("/api/rooms", json={"kind": "DEMO"})
+    assert response.status_code == 201, response.text
+    slug = response.json()["slug"]
+    async with engine.connect() as connection:
+        members = dict(
+            (
+                await connection.execute(
+                    text("""
+            SELECT m.name, m.id FROM members m JOIN groups g ON g.id=m.group_id
+            WHERE g.slug=:slug ORDER BY m.id
+        """),
+                    {"slug": slug},
+                )
+            ).all()
+        )
+    return {"slug": slug, "members": members}

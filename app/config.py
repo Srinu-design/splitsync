@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated, NamedTuple
 
-from pydantic import PositiveInt, field_validator
+from pydantic import Field, PositiveInt, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     LOG_LEVEL: str = "INFO"
     EXPOSE_WORKER_PID: bool = False
+    # DECISION: Pool limits stay 5+5 per worker; concurrency tests can request 12 connections.
+    DB_POOL_SIZE: PositiveInt = 5
+    DB_MAX_OVERFLOW: Annotated[int, Field(ge=0)] = 5
 
     @field_validator("DEMO_LIMITS", "GROUP_LIMITS", mode="before")
     @classmethod

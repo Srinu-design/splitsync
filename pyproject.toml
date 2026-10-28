@@ -36,6 +36,8 @@ select = ["E", "F", "I", "B", "UP"]
 "app/seed_data.py" = ["E501"]
 # DECISION: Keep the schema DDL's original long lines without changing the spec block.
 "migrations/versions/0001_initial.py" = ["E501"]
+# DECISION: Preserve the spec's ledger integrity SQL verbatim in the integration helper.
+"tests/integration/conftest.py" = ["E501"]
 
 [tool.ruff.format]
 # DECISION: Preserve formatting in the four verbatim blocks and their source spec.
@@ -50,6 +52,9 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["integration: requires the local SplitSync PostgreSQL service"]
+markers = [
+    "integration: requires the local SplitSync PostgreSQL service",
+    "naive_drift: expects the intentional naive settlement cache drift",
+]
 # DECISION: Import ./app directly in plain test directories without packaging or test __init__.
 pythonpath = ["."]

@@ -33,6 +33,8 @@ def test_every_spec_default():
         "RATE_LIMIT_ENABLED": True,
         "LOG_LEVEL": "INFO",
         "EXPOSE_WORKER_PID": False,
+        "DB_POOL_SIZE": 5,
+        "DB_MAX_OVERFLOW": 5,
     }
 
 
