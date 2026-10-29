@@ -88,6 +88,8 @@ PAGE = """<!doctype html><meta charset="utf-8"><body>
       drawn.setAttribute("width", Math.ceil(box.width));
       drawn.setAttribute("height", Math.ceil(box.height));
       drawn.style.removeProperty("max-width");
+      // Mermaid leaves the canvas transparent; on GitHub's dark theme the dark text vanishes.
+      drawn.style.backgroundColor = CONFIG.themeVariables.background;
       // XMLSerializer, not the HTML string: a stand-alone .svg must be well-formed XML.
       out[name] = new XMLSerializer().serializeToString(drawn);
     } catch (e) {
