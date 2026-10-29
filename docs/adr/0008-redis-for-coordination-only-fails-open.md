@@ -4,7 +4,7 @@ Status: Accepted · Date: 2026-10-29
 
 ## Context
 
-In a multi-worker web application, worker processes need cross-process coordination: broadcasting WebSocket updates to clients connected to other workers, tracking sliding-window rate limit counters across IP addresses, and ensuring only one worker executes background room cleanup sweeps.
+In a multi-worker web application, worker processes need cross-process coordination: broadcasting WebSocket updates to clients connected to other workers, keeping per-IP rate-limit counters, and ensuring only one worker executes background room cleanup sweeps.
 
 If an application relies on Redis for data persistence or distributed locking (e.g., using Redis `SET NX` to serialize financial writes), any Redis downtime or network partition causes application-wide outages and risks data inconsistency.
 
@@ -17,7 +17,7 @@ Redis 8 (`redis:8-alpine`) is restricted strictly to coordination tasks. It hold
 - **Rate limiting counters:**
   Fixed-window counters in Redis track per-IP request rates (`app/api/rate_limit.py`).
 - **Distributed sweep leader lock:**
-  Workers run a periodic sweep task to delete expired demo rooms (`app/services/rooms.py`). A distributed lock via `SET splitsync:lock:sweep <token> NX PX 60000` ensures only one worker executes the cleanup per interval. The lock is safely released via an atomic Lua script matching the token.
+  Every worker runs a sweep loop (every 10 minutes, ±1 minute of jitter) that deletes expired rooms of both kinds (`app/services/rooms.py`). A lock via `SET splitsync:sweep <token> NX PX 120000` lets only one worker do the sweep each time. The lock is safely released via an atomic Lua script matching the token.
 - **Fail-open resilience:**
   If Redis crashes, is unreachable, or encounters an error:
   1. **Writes continue to succeed:** PostgreSQL guarantees ACID transactions and concurrency control.

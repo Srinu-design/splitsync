@@ -33,7 +33,7 @@ Similarly, full-text search across multi-tenant databases typically uses Postgre
 ## Consequences
 
 - The activity feed pages smoothly with zero drift or duplicated items regardless of concurrent write traffic.
-- Full-text search matches partial word inputs with sub-25 ms latency on fully loaded rooms.
+- Prefix search on a full room measured 5–25 ms locally and 5–41 ms on the throttled EC2 host.
 - Validated in [`tests/unit/test_query_cursors.py`](../../tests/unit/test_query_cursors.py), [`tests/integration/test_history.py`](../../tests/integration/test_history.py), and [`tests/integration/test_search.py`](../../tests/integration/test_search.py).
 
 ## When we would revisit

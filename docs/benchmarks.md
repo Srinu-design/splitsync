@@ -20,7 +20,7 @@ comes from local hardware benchmarks, the live AWS EC2 host (`portfolio-apps`), 
 | **Search query latency** | **10.4 ms** (local) / **14.6 ms** (EC2 throttled) | Prefix full-text search across 10,000 expenses |
 | **Sequential write throughput** | **48.0 ms** (local) / **89.7 ms** (EC2 throttled) | Sequential HTTP writes against live app |
 | **Database footprint at caps** | **32 MB** (local) / **25 MB** (EC2) | One room at maximum configured limits |
-| **Deployment & smoke time** | **18 seconds** in CI | From git push to automated smoke validation on EC2 |
+| **Deploy on the host** | **18 seconds** | `deploy.sh`: build, migrate, swap, smoke test (the whole deploy job: 29 s) |
 
 ---
 
@@ -30,12 +30,12 @@ comes from local hardware benchmarks, the live AWS EC2 host (`portfolio-apps`), 
 |---|---|---|---|
 | **Host** | Laptop: 13th Gen Intel Core i7-13700H (20 threads) | AWS EC2 `t3.small` (ap-southeast-2) | Reference container (2 vCPU) |
 | **CPU / Arch** | x86_64, 14 cores (6P + 8E), 20 vCPUs | 2 vCPU Intel Xeon Platinum 8259CL | 2 vCPU |
-| **RAM / Swap** | 16 GiB RAM | 2 GiB RAM + 2 GiB swap file | 2 GiB RAM |
-| **CPU Credit Mode**| N/A (mains power, high performance) | Standard mode (measured at **0 credits / 20% baseline**) | Baseline |
-| **Operating System**| Linux (Ubuntu 24.04 LTS) | Linux (Ubuntu 24.04 LTS) | Linux |
-| **PostgreSQL** | PostgreSQL 16.4 on Docker Compose | PostgreSQL 16 with pgvector 0.8.7 (`deploy/portfolio/`) | PostgreSQL 16 |
-| **Redis** | Redis 8 on Docker Compose (`redis:8-alpine`) | Redis 8 on Docker Compose (`redis:8-alpine`) | Redis 7/8 |
-| **Reverse Proxy** | None (direct port 8300) | Caddy 2 (`caddy:2.11.6`) with TLS & HTTP/2 | Nginx / Caddy |
+| **RAM / Swap** | 16 GB RAM | 2 GiB RAM + 2 GiB swap file | — |
+| **CPU Credit Mode**| — | Standard mode (measured at **0 credits / 20% baseline**) | — |
+| **Operating System**| Ubuntu 26.04 LTS | Ubuntu 24.04 LTS | — |
+| **PostgreSQL** | PostgreSQL 16 + pgvector 0.8.7 on Docker Compose | PostgreSQL 16 with pgvector 0.8.7 (`deploy/portfolio/`) | PostgreSQL 16 |
+| **Redis** | Redis 8 on Docker Compose (`redis:8-alpine`) | Redis 8 on Docker Compose (`redis:8-alpine`) | — |
+| **Reverse Proxy** | None (direct port 8300) | Caddy 2 (`caddy:2.11.6`) with TLS & HTTP/2 | — |
 | **Python Stack** | Python 3.12, FastAPI, Uvicorn (2 workers) | Python 3.12, FastAPI, Uvicorn (2 workers) | Python 3.12 |
 
 > [!NOTE]
@@ -62,7 +62,7 @@ Measured against local Docker Compose on Intel Core i7-13700H:
 | **Snapshot build (median of 5 runs, cold cache)** | — | **276.2 ms** | **154 ms** |
 | ↳ Pairwise SQL (`OWED_SQL`) | — | 78.2 ms | 49 ms |
 | ↳ Integrity queries (`INTEGRITY_SQL`) | — | 210.9 ms | 100 ms |
-| ↳ Python plans (Greedy + Exact bitmask DP) | — | 0.4 ms | 1 ms |
+| ↳ Python plans (Greedy + Exact bitmask DP) | — | 0.4 ms | — |
 | **History page (50 items with keyset cursor)** | 50 | **5.1 ms** | **9 ms** |
 | **Searches median (across 5 query shapes)** | 50 | **10.4 ms** | **10–42 ms** |
 | ↳ Prefix query: `vil` | 50 | 16.5 ms | — |
@@ -99,19 +99,17 @@ Live container memory utilization (`docker stats`):
 
 ## Exact solver scaling (LeetCode 465)
 
-Execution time for the $O(2^n \cdot n)$ bitmask dynamic programming solver in [`app/domain/simplify.py`](../app/domain/simplify.py) as non-zero balance count ($n$) increases:
+The spec's measurements of the $O(2^n \cdot n)$ bitmask dynamic programming solver in [`app/domain/simplify.py`](../app/domain/simplify.py) (CPython, 2 vCPU dev container) as the non-zero balance count ($n$) increases:
 
 | Non-Zero Balances ($n$) | Bitmask States ($2^n$) | Execution Time (CPython 3.12) | Decision |
 |---|---|---|---|
-| 10 | 1,024 | 0.8 ms | Optimal |
 | 12 | 4,096 | 3.7 ms | Optimal |
 | 13 | 8,192 | 12.8 ms | Optimal |
 | 14 | 16,384 | 22.2 ms | Optimal |
 | **15** | **32,768** | **35.6 ms** | **Optimal (Threshold)** |
 | 16 | 65,536 | 75.4 ms | Fallback to Greedy |
-| 18 | 262,144 | 338.2 ms | Fallback to Greedy |
 
-When $n \le 15$, SplitSync recommends the exact optimal plan. Above 15, the solver falls back to the two-heap greedy algorithm ($O(N \log N)$), which executes in **0.4 ms** even at 50 members.
+When $n \le 15$, SplitSync recommends the exact optimal plan. Above 15, the solver falls back to the two-heap greedy algorithm ($O(N \log N)$): the big-room check above, with 50 non-zero balances, spent **0.4 ms** in Python plans.
 
 ---
 
@@ -134,14 +132,13 @@ Tests executed against the live deployment over HTTP/2:
    - Ledger drift: **Aarav +₹45,000, Karthik −₹45,000 (Red alert)**.
 4. **Multi-Worker WebSocket Fan-Out:**
    Sockets connected across both independent Uvicorn worker processes.
-   - Result: **6 of 6 WebSockets across both workers received the new versioned snapshot** via Redis Pub/Sub within 12 ms of transaction commit.
+   - Result: **6 of 6 WebSockets across both workers received the new versioned snapshot** via Redis Pub/Sub.
 
 ---
 
 ## Deployment and smoke benchmarks
 
-- **Full CI deploy time:** **18 seconds** (GitHub Actions trigger to verified running container).
-- **Smoke test duration:** **0.8 seconds** (`python -m app.smoke`).
+- **Deploy on the host:** **18 seconds** (`deploy.sh`: build, migrate, swap, smoke test); the whole GitHub Actions deploy job took 29 s. CI before it takes about 2 minutes.
 - **Smoke validation checks:**
   - Graph version: **9**
   - Pairwise IOUs: **10**
@@ -182,11 +179,11 @@ Opens WebSockets until both worker PIDs are observed, executes a write, and veri
 ```bash
 PYTHONPATH=. uv run python tests/load/big_room.py
 ```
-Populates a 50-member group with 20,800 records, benchmarks cold snapshot construction, history pagination, and 5 search queries, executes 20 live HTTP writes, verifies ledger invariants, and tears down the room.
+Fills one group to its caps with `COPY`, benchmarks cold snapshot construction, history pagination, and 5 search queries, executes 20 live HTTP writes, verifies ledger invariants, and tears down the room.
 
 ### 5. Run the deployment smoke test
 
 ```bash
-python -m app.smoke http://localhost:8300
+uv run python -m app.smoke http://localhost:8300
 ```
 Creates a fresh demo room, queries its state, and asserts that the Goa trip seed produces exactly 10 IOUs $\rightarrow$ 3 optimal transfers with zero ledger drift.

@@ -10,7 +10,7 @@ Furthermore, updating balances purely via event replay from genesis scales poorl
 
 ## Decision
 
-The ledger is append-only. Rows in `expenses`, `expense_splits`, `settlements`, and `reversals` are never mutated or deleted via SQL `UPDATE` or `DELETE`.
+The ledger is append-only. No write path runs `UPDATE` or `DELETE` on rows in `expenses`, `expense_splits`, `settlements` or `reversals`. The only deletions remove a whole room's rows: resetting a demo room, and the sweep deleting expired rooms.
 
 - **Reversals for edits and deletes:**
   - Deleting an expense inserts a row into `reversals` with `reason = 'DELETE'`, referencing `expense_id`.
@@ -33,8 +33,8 @@ The ledger is append-only. Rows in `expenses`, `expense_splits`, `settlements`, 
 
 - Full history is preserved by design. Every previous version, deletion, and restoration is recorded and inspectable via the activity feed.
 - One-tap "Undo" comes for free: restoring a deleted expense is simply writing another append-only record.
-- Reads are instantaneous: fetching balances takes under 1 ms by reading `members.net_balance_paise`.
-- Reversal rows consume additional storage, but database caps (up to 10,000 rows per group) ensure total group size remains under 32 MB.
+- Balances are one indexed read of `members.net_balance_paise`, not a scan of the ledger.
+- Reversal rows consume additional storage, but the caps (10,000 expense versions and 10,000 settlements per group) bound it: a full group measured 25–32 MB.
 
 ## When we would revisit
 

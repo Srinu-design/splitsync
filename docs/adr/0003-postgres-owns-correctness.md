@@ -24,7 +24,7 @@ PostgreSQL 16 is the single source of truth and exclusively owns transactional c
   To prevent lock cycles across concurrent operations, transactions follow a strict global lock hierarchy:
   1. Room row lock (`groups ... FOR UPDATE`).
   2. Member row locks in ascending order of primary key ID (`ORDER BY id`).
-  In [`app/db.py write_tx()`](../../app/db.py), transactions configure `SET LOCAL lock_timeout = '2s'`. Lock timeouts raise SQLSTATE `55P03`, mapped to `409 GROUP_BUSY`. Serialization failures (`40001`) and deadlocks (`40P01`) retry up to 3 times with randomized exponential backoff.
+  In [`app/db.py write_tx()`](../../app/db.py), transactions configure `SET LOCAL lock_timeout = '2s'`. Lock timeouts raise SQLSTATE `55P03`, mapped to `409 GROUP_BUSY`. Serialization failures (`40001`) and deadlocks (`40P01`) are tried up to 3 times in all, with a random 50–200 ms pause between tries.
 
 ## Alternatives considered
 

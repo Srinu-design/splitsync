@@ -10,7 +10,7 @@ SplitSync displays two visual debt graphs:
 
 An intuitive initial design would be to update the left graph by subtracting recorded settlements directly from pairwise edges. However, pairwise accounting cannot absorb simplified settlements between participants who do not share a direct debt edge.
 
-For example, in the demo trip, the optimal settlement plan instructs Karthik to pay Aarav ₹5,000. But Karthik never owed Aarav directly—Karthik owed Priya and Rohan, who in turn owed Aarav. If Karthik's ₹5,000 payment to Aarav is recorded against the pairwise graph, it creates a new negative edge (Aarav owes Karthik ₹5,000). After all three optimal payments are executed, the "before" graph still displays 10 directed debt edges forming complex cycles that cancel out per person, confusing users.
+For example, in the demo trip, the optimal plan has Karthik pay Aarav ₹5,000, but Karthik's direct IOU to Aarav is only ₹2,380. Subtracted pairwise, the payment flips that edge: Aarav would now "owe" Karthik ₹2,620. After all three optimal payments, the pairwise graph still shows 10 arrows that only cancel out per person, which confuses users.
 
 ## Decision
 

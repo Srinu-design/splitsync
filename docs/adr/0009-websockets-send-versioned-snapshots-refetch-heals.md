@@ -22,7 +22,7 @@ WebSockets transmit complete, versioned room snapshots after every committed wri
   }
   ```
 - **Monotonic version filtering:**
-  Every snapshot carries `version = groups.graph_version`. In [`static/app.js`](../../static/app.js), the browser maintains `currentGraphVersion`. Any incoming snapshot where `version <= currentGraphVersion` is dropped. If network packets arrive out of order, stale snapshots are safely ignored.
+  Every snapshot carries `version = groups.graph_version`. In [`static/app.js`](../../static/app.js), the page keeps `currentVersion`. Any incoming snapshot where `version <= currentVersion` is dropped. If network packets arrive out of order, stale snapshots are safely ignored.
 - **Self-healing refetch:**
   Clients poll `GET /api/rooms/{slug}/state` every 30 seconds and immediately upon WebSocket reconnection. If a WebSocket message is dropped due to a worker crash or Redis blip, the client heals automatically within 30 seconds.
 - **Connection management & security:**
@@ -40,7 +40,7 @@ WebSockets transmit complete, versioned room snapshots after every committed wri
 
 - Absolute consistency: clients always render a valid, verified database state.
 - Simplified frontend: rendering code simply takes the new snapshot and updates the DOM, eliminating client-side state reconciliation algorithms.
-- Payload size for a 50-member group with 10,000 expenses is approximately 8–15 KB compressed, easily handled by modern mobile networks.
+- A snapshot lists only the 50 newest expenses, so its size stays bounded even in a full group.
 - Validated in [`tests/integration/test_ws.py`](../../tests/integration/test_ws.py) and [`tests/e2e/test_multiworker_fanout.py`](../../tests/e2e/test_multiworker_fanout.py).
 
 ## When we would revisit

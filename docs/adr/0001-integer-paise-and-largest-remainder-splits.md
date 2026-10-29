@@ -22,14 +22,14 @@ Store all monetary amounts as 64-bit signed integers (`BIGINT`) representing Ind
 ## Alternatives considered
 
 - **Binary floats (`FLOAT` / `DOUBLE PRECISION`).** Simple, but causes rounding drift and breaks the invariant that member balances sum to zero.
-- **PostgreSQL `NUMERIC` / `DECIMAL`.** Exact, but slower for arithmetic, requires floating representations in client JSON, and does not resolve who gets the indivisible leftover paisa.
-- **Round-robin tie-breaking based on member name or ID.** Leads to systematic unfairness where member ID 1 always pays the rounding discrepancy on equal splits.
+- **PostgreSQL `NUMERIC` / `DECIMAL`.** Exact, but money travels as decimal strings through every layer, and it still does not decide who gets the indivisible leftover paisa.
+- **Fixed tie-breaking by member name or ID.** Leads to systematic unfairness where member ID 1 always pays the rounding discrepancy on equal splits.
 
 ## Consequences
 
 - Balances across all room members are guaranteed to sum to exactly `0` paise at all times (`sum(net_balance_paise) == 0`).
 - Every member's share is within 1 paisa of their mathematically exact proportion.
-- Validated via property-based hypothesis testing over 2,000 randomized split configurations in [`tests/unit/test_allocation.py`](../../tests/unit/test_allocation.py) and string validation tests in [`tests/unit/test_money.py`](../../tests/unit/test_money.py).
+- Checked by a Hypothesis property test over 2,000 random splits in [`tests/unit/test_allocation.py`](../../tests/unit/test_allocation.py) and string validation tests in [`tests/unit/test_money.py`](../../tests/unit/test_money.py).
 
 ## When we would revisit
 

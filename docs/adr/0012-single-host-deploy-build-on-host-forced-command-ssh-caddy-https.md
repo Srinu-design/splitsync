@@ -28,17 +28,17 @@ The deployment pipeline is fully self-contained on the host, executed by [`deplo
   3. Run database migrations via one-off container: `docker compose run --rm splitsync-migrate alembic upgrade head`.
   4. Replace `splitsync-app` and wait up to 120 seconds for container healthcheck (`/readyz`).
   5. **Execute smoke test:** Run [`python -m app.smoke`](../../app/smoke.py) inside the container. The smoke test creates a fresh demo room and verifies the exact mathematical invariants: version 9, 10 pairwise IOUs, 4 greedy transfers, 3 optimal transfers, and ₹0 drift.
-  6. **Automated rollback:** If healthcheck or smoke test fails, `deploy.sh` automatically checks out the previous recorded SHA, brings up the previous container, and verifies it with the smoke test. Every step logs to `/opt/splitsync/deploy-history.log`.
+  6. **Automated rollback:** If the health check or smoke test fails, `deploy.sh` checks out the previous release, starts its image again, and verifies it with the smoke test. Every step logs to `/opt/splitsync/deploy-history.log`.
 
 ## Alternatives considered
 
 - **Pushing images to GitHub Container Registry (GHCR).** Adds external token management, external bandwidth transfer delays, and failure modes when registry rate limits or authentication tokens expire.
 - **Nginx with Certbot.** Requires separate cron jobs for certificate renewals, manual config reloading, and complex HTTP/2 configuration compared to Caddy's single Caddyfile.
-- **Deploying without a domain or HTTPS.** Modern mobile browsers restrict WebSockets and crypto APIs over plain HTTP. `sslip.io` with Caddy provides automated trusted HTTPS without purchasing a custom domain.
+- **Plain HTTP on the bare IP.** Works, but browsers speak HTTP/2 only over TLS, so the chaos demo's 10 requests would queue on 6 HTTP/1.1 connections. `sslip.io` with Caddy gives trusted HTTPS without buying a domain.
 
 ## Consequences
 
-- Full deployment pipeline takes **18 seconds** in CI from push to smoke-tested live service.
+- `deploy.sh` takes about **18 seconds** from build to a smoke-tested release (the whole deploy job: 29 s, after about 2 minutes of CI).
 - If a release boots cleanly but contains an arithmetic bug in ledger calculation, the smoke test catches it and rolls back the deployment automatically with zero human intervention.
 - The deploy key cannot be abused to compromise the host operating system.
 - Validated in [`tests/unit/test_deploy_script.py`](../../tests/unit/test_deploy_script.py) and [`tests/integration/test_smoke.py`](../../tests/integration/test_smoke.py).

@@ -33,7 +33,7 @@ Compute both greedy and exact algorithms in [`app/domain/simplify.py`](../../app
   - When non-zero balances $n \le 15$, the exact solver runs and SplitSync recommends `OPTIMAL`.
   - When $n > 15$, the exact solver is skipped, `optimal` returns `None`, and the plan returns `recommended = "GREEDY"`.
 
-Measured execution times on CPython 3.12:
+The spec's measurements (CPython, 2 vCPU dev container), by number of non-zero balances:
 - 12 members: 3.7 ms
 - 13 members: 12.8 ms
 - 14 members: 22.2 ms

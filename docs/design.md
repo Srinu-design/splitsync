@@ -16,7 +16,7 @@ are in [diagrams.md](diagrams.md).
 
 When friends share costs on a trip or in an apartment, pairwise accounting quickly degenerates into an unreadable
 web of debts. Five people on an 8-expense holiday can generate 10 pairwise debts where everyone owes someone else.
-Commercial splitters often suffer from four fundamental flaws:
+A naive splitter gets four things wrong:
 1. They use floating-point numbers, creating rounding drift where balances stop summing to zero.
 2. They allow concurrent lost updates: two roommates submitting payments simultaneously overwrite each other's balances.
 3. They overwrite database rows on edits and deletes, destroying audit trails and preventing undo.
@@ -29,14 +29,14 @@ Commercial splitters often suffer from four fundamental flaws:
 - **Exactly-once writes.** Under high concurrency, double-taps, network retries, and racing edits must either replay cleanly or fail with deterministic conflict errors.
 - **Optimal debt simplification.** Compute both a fast greedy plan and an exact bitmask dynamic programming plan that finds the absolute minimum number of settlement payments.
 - **Real-time fan-out.** Every connected device in a room receives full state updates over WebSockets immediately after any write commits.
-- **Autonomous deployment.** CI triggers unattended zero-downtime deploys on EC2 with automated smoke validation and instant rollback on failure.
+- **Unattended deployment.** A green CI run on `main` deploys to EC2, smoke-tests the new release and rolls back by itself if the test fails.
 
 ### Non-goals
 
 - **Moving money.** SplitSync never moves money. Users settle debts out-of-band (e.g. via UPI, cash, or bank transfer); SplitSync only records these payments to balance the ledger.
 - **Multi-region active-active database.** One PostgreSQL database is the single transactional source of truth.
 - **High-availability clustering.** SplitSync runs on a single AWS EC2 instance (`t3.small`). If the virtual machine halts, SplitSync is unavailable until restarted.
-- **User accounts and authentication.** Rooms are accessed via unguessable 64-bit random slugs; there are no passwords, OAuth flows, or user identity directories.
+- **User accounts and authentication.** Rooms are reached by unguessable random slugs (64 bits); there are no passwords, OAuth flows, or user identity directories.
 
 ---
 
@@ -47,7 +47,7 @@ SplitSync separates transactional correctness from multi-worker coordination:
 ![SplitSync components](images/diagrams/components.svg)
 
 - **PostgreSQL 16** is the single source of truth. It owns row locks, optimistic version checks, composite foreign keys, and atomic balance increments.
-- **Redis 8** handles non-durable coordination: WebSocket Pub/Sub message fan-out, sliding-window rate limiting, and distributed leader locks for background janitor sweeps.
+- **Redis 8** handles non-durable coordination: WebSocket Pub/Sub message fan-out, fixed-window rate limiting, and a leader lock for the background room-expiry sweep.
 - **Caddy 2** terminates TLS, manages Let's Encrypt certificates automatically for `3-25-14-19.sslip.io`, and proxies HTTP/2 and WebSocket connections to the FastAPI app.
 - **FastAPI / Uvicorn (2 workers)** runs stateless application logic with pure domain engines for money allocation and debt simplification.
 
@@ -63,7 +63,7 @@ Caddy (Reverse Proxy) ── TLS termination & HTTP/2 stream multiplexing
 SplitSync Worker (FastAPI)
    │  1. BodyLimitMiddleware enforces <= 16 KB body limit
    │  2. ObservabilityMiddleware assigns X-Request-ID
-   │  3. require_rate_limit checks Redis fixed-window token bucket (60/min)
+   │  3. require_rate_limit checks a Redis fixed-window counter (60/min)
    ▼
 write_tx (app/db.py)
    │  BEGIN TRANSACTION
@@ -99,7 +99,7 @@ ConnectionManager.broadcast()
    │  Iterates local room WebSocket connections
    ▼
 Connected Clients (WebSockets)
-   Client drops snapshot if message.version < current_version
+   Client renders a snapshot only if its version is newer than the one shown
    DOM updates reactively via safe textContent mutations
 ```
 
@@ -111,7 +111,7 @@ Connected Clients (WebSockets)
 
 ### Integer paise representation
 
-Money in SplitSync is stored exclusively as positive 64-bit signed integers representing Indian paise (₹1 = 100 paise). The maximum allowable expense or payment is capped at ₹10,00,000.00 (`MAX_PAISE = 100_000_000` paise in [`app/domain/money.py`](../app/domain/money.py)).
+Money in SplitSync is stored exclusively as 64-bit integers (`BIGINT`) of Indian paise (₹1 = 100 paise). The maximum allowable expense or payment is capped at ₹10,00,000.00 (`MAX_PAISE = 100_000_000` paise in [`app/domain/money.py`](../app/domain/money.py)).
 
 Floating-point numbers (`float`) are strictly forbidden from domain calculations and database schemas. Floating-point arithmetic fails on standard decimal fractions: in IEEE 754 floating point, `0.1 + 0.2 != 0.3`, and `₹100 / 3` evaluates to `33.333333333333336`, causing fractional paise drift.
 
@@ -143,7 +143,7 @@ order = ids[rot:] + ids[:rot]
 pos = {m: i for i, m in enumerate(order)}
 winners = set(sorted(ids, key=lambda m: (-rem[m], pos[m]))[:leftover])
 ```
-Every share lands within 1 paisa of its mathematical ideal. This invariant is validated by property-based hypothesis testing over 2,000 randomized split configurations in [`tests/unit/test_allocation.py`](../tests/unit/test_allocation.py).
+Every share lands within 1 paisa of its mathematical ideal. This invariant is checked by a Hypothesis property test over 2,000 random splits in [`tests/unit/test_allocation.py`](../tests/unit/test_allocation.py).
 
 ---
 
@@ -216,7 +216,7 @@ In [`app/db.py write_tx()`](../app/db.py), transactions configure explicit timeo
 
 If a transaction waits more than 2 seconds for a lock, PostgreSQL raises SQLSTATE `55P03` (`lock_not_available`), which `write_tx()` catches and converts into HTTP `409 Conflict` with error code `GROUP_BUSY` and header `Retry-After: 1`.
 
-If unexpected serialization failures (`40001`) or deadlock conditions (`40P01`) occur, `write_tx()` automatically retries up to 3 times with randomized exponential jitter between 50 ms and 200 ms:
+If unexpected serialization failures (`40001`) or deadlock conditions (`40P01`) occur, `write_tx()` tries the transaction up to 3 times in all, sleeping a random 50–200 ms between tries:
 ```python
 except DBAPIError as error:
     state = getattr(error.orig, "sqlstate", None)
@@ -257,7 +257,7 @@ When 10 concurrent payments of ₹5,000 are recorded in naive mode:
 
 ### Reversal entries and `revision_of`
 
-SplitSync adheres to the accounting principle that true financial ledgers are immutable. `UPDATE` and `DELETE` statements are never executed against recorded expenses or settlements.
+SplitSync follows the accounting rule that a ledger is never rewritten: no write path runs `UPDATE` or `DELETE` on a recorded expense or settlement. The only deletions are whole-room ones: resetting a demo room, and the sweep removing rooms that expired.
 
 ![Two people edit one expense](images/diagrams/seq-edit.svg)
 
@@ -399,15 +399,15 @@ Total transfers: **3 optimal transfers** (a 70% reduction from the 10 pairwise d
 
 Because $O(2^n \cdot n)$ exhibits exponential growth, CPU execution time scales rapidly with non-zero participants:
 
-| Non-zero balances ($n$) | Bitmask States ($2^n$) | Execution Time (CPython 3.12) | Status |
+These are the spec's measurements of the exact solver (CPython, 2 vCPU dev container):
+
+| Non-zero balances ($n$) | Bitmask States ($2^n$) | Execution Time | Status |
 |---|---|---|---|
-| 10 | 1,024 | 0.8 ms | Optimal |
 | 12 | 4,096 | 3.7 ms | Optimal |
 | 13 | 8,192 | 12.8 ms | Optimal |
 | 14 | 16,384 | 22.2 ms | Optimal |
 | **15** | **32,768** | **35.6 ms** | **Optimal (Threshold)** |
 | 16 | 65,536 | 75.4 ms | Fallback to Greedy |
-| 20 | 1,048,576 | ~1.5 s | Fallback to Greedy |
 
 When $n \le 15$, SplitSync displays the exact optimal plan. When $n > 15$, [`plans()`](../app/domain/simplify.py) returns `recommended = "GREEDY"`, and the UI explicitly labels the plan as greedy.
 
@@ -447,7 +447,7 @@ Instead, SplitSync transmits **complete versioned snapshots**:
   "state": { "room": {...}, "members": [...], "graph": {...}, "invariants": {...} }
 }
 ```
-Clients track `window.currentGraphVersion`. Any incoming snapshot with `version <= window.currentGraphVersion` is discarded. If packets arrive out of order, the newer version is retained and the older version is safely ignored.
+The page keeps the version it shows (`currentVersion` in `static/app.js`). Any incoming snapshot with `version <= currentVersion` is discarded. If packets arrive out of order, the newer version is retained and the older version is safely ignored.
 
 ### 30-second refetch healing
 
@@ -474,11 +474,11 @@ WebSocket lifecycle management is enforced in [`app/api/ws.py`](../app/api/ws.py
 
 ## 8. What breaks first at 10x
 
-At 10x current load (100 concurrent rooms, 500 active WebSocket clients, 50 writes/sec):
+A prediction, not a measurement: at roughly 100 busy rooms, 500 open WebSockets and 50 writes/s:
 
 1. **The First Bottleneck: Snapshot Generation CPU.**
    Currently, every write triggers a full snapshot build (`OWED_SQL`, `INTEGRITY_SQL`, and Python plans). On a full group (50 members, 10,000 expenses), building a snapshot requires 276 ms local and 478 ms on EC2. At 50 writes/sec across multiple rooms, the 2 Uvicorn worker CPUs will saturate completely.
-   *Fix:* Incremental snapshot caching: cache the pairwise edge matrix in Redis and apply $\pm \Delta$ deltas directly on writes rather than rescanning all active expenses.
+   *Fix:* build at most one snapshot per room per burst (coalesce writes that arrive while a build runs), then keep per-pair totals in Postgres updated by each write instead of rescanning every active expense.
 
 2. **The Second Bottleneck: PostgreSQL Connection Pool.**
    The production pool is sized at `pool_size = 3`, `max_overflow = 2` per worker (`deploy/compose.prod.yaml`), allowing 10 concurrent connections to PostgreSQL (`max_connections = 60`). With 10x concurrent writes, `write_tx()` transactions queuing on `SET LOCAL lock_timeout = '2s'` will exhaust the pool.
@@ -490,7 +490,7 @@ At 10x current load (100 concurrent rooms, 500 active WebSocket clients, 50 writ
    - `postgres`: 114 MB
    - `caddy`: 49 MB
    - `redis`: 8 MB
-   Under 10x WebSocket connections, buffer memory for 5,000 open sockets will push the OS into swap, degrading disk I/O.
+   The app container is capped at 400 MB; more rooms means more cached snapshots and more socket buffers, and past that cap the host starts using swap.
 
 ---
 
@@ -498,12 +498,12 @@ At 10x current load (100 concurrent rooms, 500 active WebSocket clients, 50 writ
 
 | Failure | Immediate Impact | How SplitSync Handles It | User Experience |
 |---|---|---|---|
-| **PostgreSQL down** | All writes and snapshot reads fail | Healthchecks fail (`/readyz` returns 503); `write_tx()` raises connection error | Toast notification: "Network or server error. Retrying..."; data remains safe |
+| **PostgreSQL down** | All writes and snapshot reads fail | `/readyz` returns 503; requests fail with an error response | The page shows an error; nothing committed is lost |
 | **Redis down** | Cross-worker live updates fail; rate limiting fails | Application fails open: [`publish()`](../app/services/realtime.py) falls back to local in-process broadcast; [`check_rate_limit()`](../app/api/rate_limit.py) returns `allowed=True` | Sockets on the same worker update live; sockets on other workers update within 30s via refetch |
-| **Worker process crashes** | Worker drops in-flight requests and active WebSockets | Systemd / Docker restarts worker container; OS reclaims locks; clients reconnect to remaining worker | Browsers reconnect with backoff; pending HTTP writes retry with Idempotency-Key |
+| **Worker process crashes** | Worker drops in-flight requests and its WebSockets | Uvicorn starts a new worker; Postgres rolls back the dead connection's transaction and releases its locks; Docker restarts the container if it exits | Browsers reconnect with backoff; a retried write with the same Idempotency-Key is replayed, not repeated |
 | **Background publish lost** | Real-time WebSocket snapshot not emitted | Handled gracefully: `publish_snapshot_task()` catches error and logs warning; write remains committed | Clients heal state on the next 30-second refetch interval or on manual page reload |
-| **Deployment fails smoke test** | New release fails health check or computes seed incorrectly | [`deploy/deploy.sh`](../deploy/deploy.sh) catches non-zero exit from `app.smoke`, aborts release, restores previous image, and smoke tests rollback | Zero user downtime; previous release continues serving uninterrupted |
-| **Disk space fills up** | PostgreSQL risk of table corruption | [`app/services/rooms.py check_database_size()`](../app/services/rooms.py) queries `pg_database_size('splitsync')` before room creation; rejects writes if DB > `MAX_DB_SIZE_MB` (500 MB) | Room creation returns `422 ROOM_LIMIT`; existing rooms remain accessible |
+| **Deployment fails smoke test** | New release fails health check or computes seed incorrectly | [`deploy/deploy.sh`](../deploy/deploy.sh) sees the failed health check or `app.smoke`, starts the previous image again and smoke-tests it | A short outage while the containers swap (seconds); then the previous release serves again |
+| **Disk space fills up** | Postgres stops accepting writes | Room creation in [`app/services/rooms.py`](../app/services/rooms.py) checks `pg_database_size(current_database())` and refuses new rooms above `MAX_DB_SIZE_MB` (2,048 MB on the host) | New rooms get `503 STORAGE_FULL`; existing rooms keep working within their caps |
 
 ---
 
@@ -516,11 +516,11 @@ At 10x current load (100 concurrent rooms, 500 active WebSocket clients, 50 writ
    ```
    No external CDNs, Google Analytics, or third-party origins are permitted.
 2. **XSS Defense via `textContent` Only:**
-   The frontend code in [`static/app.js`](../static/app.js) and [`static/graph.js`](../static/graph.js) strictly prohibits `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, or `eval()`. All dynamic values (member names, expense titles, amounts) are rendered exclusively via `element.textContent` or `document.createTextNode()`. Verified by AST and pattern scanning in [`tests/unit/test_static_safety.py`](../tests/unit/test_static_safety.py).
+   The frontend code in [`static/app.js`](../static/app.js) and [`static/graph.js`](../static/graph.js) strictly prohibits `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, or `eval()`. All dynamic values (member names, expense titles, amounts) are rendered exclusively via `element.textContent` or `document.createTextNode()`. Checked by pattern scanning in [`tests/unit/test_static_safety.py`](../tests/unit/test_static_safety.py).
 3. **Cross-Site WebSocket Hijacking Protection:**
    The WebSocket route in [`app/api/ws.py`](../app/api/ws.py) inspects the `Origin` header against `settings.ALLOWED_ORIGINS` before accepting the connection. Unauthorized cross-site requests are immediately terminated with WebSocket close code `1008 Policy Violation`.
 4. **Rate Limiting:**
-   Enforced via Redis sliding counters in [`app/api/rate_limit.py`](../app/api/rate_limit.py):
+   Enforced via Redis fixed-window counters in [`app/api/rate_limit.py`](../app/api/rate_limit.py):
    - Room creation: 10 per hour per IP
    - State writes: 60 per minute per IP
    - Naive demo writes: 30 per minute per IP
@@ -530,7 +530,7 @@ At 10x current load (100 concurrent rooms, 500 active WebSocket clients, 50 writ
 5. **Request Body Size Limit:**
    `BodyLimitMiddleware` in [`app/middleware.py`](../app/middleware.py) inspects `Content-Length` and buffers request streams up to a hard ceiling of 16 KB (16,384 bytes). Payloads exceeding 16 KB are rejected with HTTP `413 Payload Too Large` before parsing.
 6. **Unguessable Room Slugs:**
-   Room identifiers are generated via `secrets.token_urlsafe(8)` (11 URL-safe characters, 66 bits of cryptographic entropy), preventing enumeration attacks.
+   Room identifiers are generated via `secrets.token_urlsafe(8)`: 8 random bytes (64 bits) as 11 URL-safe characters, which makes enumerating rooms impractical.
 7. **SSH Forced-Command Deployment:**
    The GitHub Actions deployment key is constrained on the EC2 host's `~/.ssh/authorized_keys`:
    ```
@@ -538,13 +538,13 @@ At 10x current load (100 concurrent rooms, 500 active WebSocket clients, 50 writ
    ```
    The forced command verifies that incoming arguments match an exact 40-character hex commit SHA, `--rollback`, or `--status`. Interactive shell execution, arbitrary commands, and file transfers are rejected.
 8. **Secrets Isolation:**
-   PostgreSQL credentials, Redis connection strings, and deploy keys exist exclusively on the EC2 host in `/opt/splitsync/.env` (mode `0600`). No secrets or credentials are ever checked into Git.
+   Database credentials exist only on the EC2 host, in `/opt/splitsync/.env` and `/opt/portfolio/.env` (mode `0600`), generated there and never displayed. The deploy key's private half is a GitHub Actions secret; the host holds only its public half. No secret is in Git.
 
 ---
 
 ## 11. Limitations and future work
 
 - **Single Host SPOF:** SplitSync runs on one EC2 virtual machine. An AWS hardware fault halts the service. Future work: Migrate to a managed PostgreSQL cluster (AWS RDS Multi-AZ) with container workers hosted across an ECS Fargate cluster.
-- **Manual Backups:** Database durability currently relies on underlying AWS EBS volume snapshots. Automated daily `pg_dump` backups pushed to encrypted Amazon S3 buckets should be added.
+- **No backups yet:** the database lives on one encrypted EBS volume with no snapshots or dumps. Automated daily `pg_dump` backups to an encrypted S3 bucket should be added.
 - **No User Accounts:** Access control is link-based (bearer token slug). Anyone with the room URL has full permission to add, edit, or delete expenses. Future work: Optional passcodes or member-specific authentication keys for non-ephemeral groups.
-- **Transactional Outbox for Eventual Consistency:** Background snapshot publishing currently runs in a FastAPI background task after commit. If the container process is terminated during the 5 ms window after transaction commit and before Redis publishing, the WebSocket notification is lost until the next client 30s refetch. A transactional outbox table in PostgreSQL processed via Debezium CDC or `LISTEN / NOTIFY` would provide guaranteed delivery.
+- **Transactional Outbox for Eventual Consistency:** Background snapshot publishing currently runs in a FastAPI background task after commit. If the process is killed in the short window after the commit and before the Redis publish, the WebSocket notification is lost until the next client 30s refetch. A transactional outbox table in PostgreSQL processed via Debezium CDC or `LISTEN / NOTIFY` would provide guaranteed delivery.
