@@ -19,6 +19,7 @@ class ConnectionManager:
         self.settings = settings
         self.rooms: dict[int, set[WebSocket]] = defaultdict(set)
         self.ip_sockets: dict[str, set[WebSocket]] = defaultdict(set)
+        self.socket_ips: dict[WebSocket, str] = {}
 
     def can_connect(self, group_id: int, client_ip: str) -> bool:
         # DECISION: Per-worker caps: maximum 20 sockets per room and 5 sockets per client IP.
@@ -27,6 +28,7 @@ class ConnectionManager:
     def connect(self, group_id: int, client_ip: str, ws: WebSocket) -> None:
         self.rooms[group_id].add(ws)
         self.ip_sockets[client_ip].add(ws)
+        self.socket_ips[ws] = client_ip
 
     def disconnect(self, group_id: int, client_ip: str, ws: WebSocket) -> None:
         self.rooms[group_id].discard(ws)
@@ -36,6 +38,7 @@ class ConnectionManager:
         self.ip_sockets[client_ip].discard(ws)
         if not self.ip_sockets[client_ip]:
             self.ip_sockets.pop(client_ip, None)
+        self.socket_ips.pop(ws, None)
 
     def format_message(self, text_payload: str) -> str:
         # DECISION: Add worker_pid at socket send time only when EXPOSE_WORKER_PID is true.
@@ -72,11 +75,13 @@ class ConnectionManager:
             if isinstance(item, tuple):
                 ws, success = item
                 if not success:
-                    # Find client IP if possible and remove
                     self.rooms[group_id].discard(ws)
-                    for ip, s_set in list(self.ip_sockets.items()):
-                        s_set.discard(ws)
-                        if not s_set:
+                    if not self.rooms[group_id]:
+                        self.rooms.pop(group_id, None)
+                    ip = self.socket_ips.pop(ws, None)
+                    if ip and ip in self.ip_sockets:
+                        self.ip_sockets[ip].discard(ws)
+                        if not self.ip_sockets[ip]:
                             self.ip_sockets.pop(ip, None)
 
 
@@ -146,10 +151,12 @@ async def publish_snapshot_task(app: Any, slug: str) -> None:
 
         snapshot = await state.build_snapshot(engine, settings, slug)
         version = snapshot["room"]["graph_version"]
-        async with engine.connect() as connection:
-            group_id = await connection.scalar(
-                text("SELECT id FROM groups WHERE slug = :slug"), {"slug": slug}
-            )
+        group_id = getattr(snapshot, "group_id", None)
+        if group_id is None:
+            async with engine.connect() as connection:
+                group_id = await connection.scalar(
+                    text("SELECT id FROM groups WHERE slug = :slug"), {"slug": slug}
+                )
         if group_id is None:
             return
 

@@ -23,10 +23,10 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 @asynccontextmanager
 async def lifespan(app):
     settings = app.state.settings
-    redis_client = make_redis(settings.REDIS_URL)
+    redis_client = getattr(app.state, "redis", None) or make_redis(settings.REDIS_URL)
     app.state.redis = redis_client
 
-    manager = ConnectionManager(settings)
+    manager = getattr(app.state, "manager", None) or ConnectionManager(settings)
     app.state.manager = manager
 
     listener_task = asyncio.create_task(realtime.redis_listener(redis_client, manager))

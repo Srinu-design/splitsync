@@ -61,6 +61,10 @@ GROUP BY s.member_id, e.paid_by;
 """
 
 
+class Snapshot(dict):
+    group_id: int
+
+
 def edge_json(edge):
     return {"from": edge[0], "to": edge[1], "amount_paise": edge[2]}
 
@@ -163,26 +167,29 @@ async def build_snapshot(engine, settings, slug):
                 recommended["edges"],
                 key=lambda edge: (-edge["amount_paise"], edge["from"], edge["to"]),
             )
-    snapshot = {
-        "room": {
-            "slug": room["slug"],
-            "kind": room["kind"],
-            "name": room["name"],
-            "graph_version": version,
-            "expires_at": room["expires_at"].isoformat(),
-        },
-        "members": members,
-        "expenses": expenses,
-        "settlements": settlements,
-        "graph": graph,
-        "invariants": integrity_report(ledger_rows, bad_splits, orphan_edits),
-        "limits": limits(room, settings)._asdict(),
-        "usage": {
-            "members": len(members),
-            "expense_rows": expense_count,
-            "settlements": settlement_count,
-        },
-    }
+    snapshot = Snapshot(
+        {
+            "room": {
+                "slug": room["slug"],
+                "kind": room["kind"],
+                "name": room["name"],
+                "graph_version": version,
+                "expires_at": room["expires_at"].isoformat(),
+            },
+            "members": members,
+            "expenses": expenses,
+            "settlements": settlements,
+            "graph": graph,
+            "invariants": integrity_report(ledger_rows, bad_splits, orphan_edits),
+            "limits": limits(room, settings)._asdict(),
+            "usage": {
+                "members": len(members),
+                "expense_rows": expense_count,
+                "settlements": settlement_count,
+            },
+        }
+    )
+    snapshot.group_id = gid
     cache[key] = snapshot
     cache.move_to_end(key)
     if len(cache) > 256:

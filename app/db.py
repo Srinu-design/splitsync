@@ -7,7 +7,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
-    async_sessionmaker,
     create_async_engine,
 )
 
@@ -24,8 +23,6 @@ def make_engine(settings: Settings) -> AsyncEngine:
 
 
 engine = make_engine(get_settings())
-# DECISION: Keep loaded values usable after commit; callers own session and transaction lifetimes.
-session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def write_tx[T](
