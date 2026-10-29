@@ -57,12 +57,6 @@
     return (str || '').replace(/[₹,\s]/g, '');
   }
 
-  function parseRupeesToPaise(str) {
-    const cleaned = cleanRupeeInput(str);
-    const num = parseFloat(cleaned);
-    return isNaN(num) ? 0 : Math.round(num * 100);
-  }
-
   function getTodayIsoDate() {
     const d = new Date();
     const year = d.getFullYear();
