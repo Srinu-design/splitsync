@@ -327,6 +327,12 @@ async def run_load_check():
         for m_id, bal in net_balances.items():
             await conn.execute("UPDATE members SET net_balance_paise = $1 WHERE id = $2", bal, m_id)
 
+        # A live room grows a few rows at a time and autovacuum keeps planner statistics current.
+        # Right after a bulk COPY they still say "1 row", and the planner picks nested loops that
+        # make the integrity queries ~8x slower than in production, so refresh them first.
+        print("Refreshing planner statistics (ANALYZE)...")
+        await conn.execute("ANALYZE")
+
         # Measure DB size
         db_size_bytes = await conn.fetchval("SELECT pg_database_size(current_database())")
         db_size_str = await conn.fetchval(

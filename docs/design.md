@@ -477,7 +477,7 @@ WebSocket lifecycle management is enforced in [`app/api/ws.py`](../app/api/ws.py
 A prediction, not a measurement: at roughly 100 busy rooms, 500 open WebSockets and 50 writes/s:
 
 1. **The First Bottleneck: Snapshot Generation CPU.**
-   Currently, every write triggers a full snapshot build (`OWED_SQL`, `INTEGRITY_SQL`, and Python plans). On a full group (50 members, 10,000 expenses), building a snapshot requires 276 ms local and 478 ms on EC2. At 50 writes/sec across multiple rooms, the 2 Uvicorn worker CPUs will saturate completely.
+   Currently, every write triggers a full snapshot build (`OWED_SQL`, `INTEGRITY_SQL`, and Python plans). On a full group (50 members, 10,000 expenses), building a snapshot takes 50 ms local (with current planner statistics) and 478 ms on the throttled EC2 host (measured before that fix). Polls are cheap: a current `If-None-Match` is answered `304` from the room row alone. At 50 writes/sec across multiple rooms, the 2 Uvicorn worker CPUs will saturate completely.
    *Fix:* build at most one snapshot per room per burst (coalesce writes that arrive while a build runs), then keep per-pair totals in Postgres updated by each write instead of rescanning every active expense.
 
 2. **The Second Bottleneck: PostgreSQL Connection Pool.**

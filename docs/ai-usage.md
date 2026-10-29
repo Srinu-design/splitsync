@@ -19,6 +19,11 @@ be judged honestly.
 - **Antigravity drafted** [design.md](design.md), the [ADRs](adr/), [demo.md](demo.md) and
   [benchmarks.md](benchmarks.md) from the spec, the guide and the code. Claude then checked every claim against the
   code and corrected about forty: invented measurements, wrong button labels, a wrong lock key, wrong limits.
+- **Refinement pass:** Antigravity made a first clean-up pass (dead code, unused CSS, a Redis client leak). Claude
+  then reviewed it, replaced its two workarounds, and went through every file. It found and fixed bugs the tests did
+  not cover, each one checked in a browser: Search and the row History buttons never opened, a live update wiped
+  a half-filled expense form, and graph arrowheads pointed at the wrong side of a node. It also found the load
+  test measuring stale planner statistics (276 ms snapshot builds that are 50 ms in a live room).
 - **Images:** the README banner is drawn from the demo trip's real numbers (10 IOUs, 3 transfers), not generated.
 
 ## What the owner did

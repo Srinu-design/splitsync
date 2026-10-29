@@ -6,3 +6,7 @@ __pycache__
 .hypothesis
 tests
 .env
+docs
+deploy
+.github
+.design-ref

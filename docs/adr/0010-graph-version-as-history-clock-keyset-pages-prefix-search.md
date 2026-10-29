@@ -15,7 +15,7 @@ Similarly, full-text search across multi-tenant databases typically uses Postgre
 - **`graph_version` as the unified history clock:**
   Every state write increments `groups.graph_version` and stamps the corresponding row. This provides a total order across all four tables: `expenses` (rank 3), `settlements` (rank 2), `reversals` (rank 1), and `members` (rank 0).
 - **Keyset cursor pagination:**
-  In [`app/services/history.py`](../../app/services/history.py), the pagination cursor encodes `version.rank.id` in base64. Each subquery in the `UNION ALL` applies an index filter `(version, rank, id) < (:cv, :ck, :cid)` and an individual `LIMIT :lim`. The outer query unions and cuts at `:lim`. This bounds the rows scanned to at most $4 \times (\text{limit} + 1)$, running in **5.1 ms local** and **9 ms reference**.
+  In [`app/services/history.py`](../../app/services/history.py), the pagination cursor encodes `version.rank.id` in base64. Each subquery in the `UNION ALL` applies an index filter `(version, rank, id) < (:cv, :ck, :cid)` and an individual `LIMIT :lim`. The outer query unions and cuts at `:lim`. This bounds the rows scanned to at most $4 \times (\text{limit} + 1)$, running in **3.0 ms local** and **9 ms reference**.
 - **Prefix search without a GIN index:**
   In [`app/services/search.py`](../../app/services/search.py), full-text search uses PostgreSQL's `'simple'` dictionary:
   ```sql

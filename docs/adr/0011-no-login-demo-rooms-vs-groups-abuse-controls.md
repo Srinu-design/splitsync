@@ -25,7 +25,7 @@ SplitSync requires no login. Rooms are reached by unguessable random URL slugs (
   - Expiry: Retained for 365 days after the last recorded activity.
   - No chaos panel. Naive mode returns `403 NAIVE_MODE_DISABLED` and reset returns `403 RESET_NOT_ALLOWED`.
 - **Caps determined from load testing:**
-  The caps come from the spec's load test of a full group, and [`tests/load/big_room.py`](../../tests/load/big_room.py) re-measures them: at the caps a group takes 17.6–32 MB on disk and builds its snapshot in 154 ms (spec) to 276 ms (this laptop), once per change.
+  The caps come from the spec's load test of a full group, and [`tests/load/big_room.py`](../../tests/load/big_room.py) re-measures them: at the caps a group takes 17.6–32 MB on disk and builds its snapshot in 50 ms (this laptop) to 154 ms (spec), once per change.
 - **Multi-layer abuse controls:**
   1. **Unguessable URLs:** 8 random bytes (64 bits) as 11 URL-safe characters make enumerating rooms impractical.
   2. **Rate limits:** Per-IP fixed-window limits (10 room creations/hour, 60 writes/min, 120 reads/min, 30 WS handshakes/min) in [`app/api/rate_limit.py`](../../app/api/rate_limit.py).

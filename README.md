@@ -29,7 +29,7 @@ All measured, with details in [docs/benchmarks.md](docs/benchmarks.md):
 | **Fewest transfers** | Demo trip: **10 IOUs → 3 transfers** (exact bitmask DP); greedy needs 4 |
 | **Exactly once** | 10 devices record one payment at once: **1 × 201, 9 × 409**; the same request × 10: **1 × 201, 9 × 200** replays of one receipt, 1 row. Both on the live server |
 | **Lost updates, made visible** | Naive mode, 10 devices: Σ balances stays ₹0, but the ledger check shows **±₹45,000** drift each on Aarav and Karthik |
-| **A full group** | 50 members, 9,900 expense versions, 9,900 settlements: snapshot **276 ms**, history page **5 ms**, search **10 ms** median, write **48 ms** (laptop) |
+| **A full group** | 50 members, 9,900 expense versions, 9,900 settlements: snapshot **50 ms**, history page **3 ms**, search **3 ms** median, write **30 ms** (laptop) |
 | **Deploy** | Push → CI → host build, migrate, swap and **smoke test in 18 s**, with automatic rollback |
 
 Naive mode is the control: the same ten requests without the room lock, the version check and the idempotency key.

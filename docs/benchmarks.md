@@ -15,10 +15,11 @@ comes from local hardware benchmarks, the live AWS EC2 host (`portfolio-apps`), 
 | **Rage-click replay** | **1 × 201, 9 × 200 replays** (1 receipt ID) | 10 concurrent requests with identical Idempotency-Key on EC2 |
 | **Naive mode race drift** | **Sum = ₹0.00, ±₹45,000 balance drift** | 10 concurrent naive payments on EC2 |
 | **WebSocket fan-out** | **6 of 6 sockets updated** across both workers | End-to-end multi-worker Redis Pub/Sub broadcast on EC2 |
-| **Full-room snapshot build** | **276.2 ms** (local) / **478 ms** (EC2 throttled) | Room at max capacity (50 members, 10,000 expenses) |
-| **History page query** | **5.1 ms** (local) / **109 ms** (EC2 throttled) | 50 items with keyset cursor pagination across 4 tables |
-| **Search query latency** | **10.4 ms** (local) / **14.6 ms** (EC2 throttled) | Prefix full-text search across 10,000 expenses |
-| **Sequential write throughput** | **48.0 ms** (local) / **89.7 ms** (EC2 throttled) | Sequential HTTP writes against live app |
+| **Full-room snapshot build** | **49.7 ms** (local) / **478 ms** (EC2 throttled, before the statistics fix below) | Room at max capacity (50 members, 10,000 expenses) |
+| **Poll with a current ETag** | **0.8 ms** (local, in-process) | `304` answered from the room row; no snapshot is built |
+| **History page query** | **3.0 ms** (local) / **109 ms** (EC2 throttled) | 50 items with keyset cursor pagination across 4 tables |
+| **Search query latency** | **3.0 ms** median, 0.8–17.4 ms (local) / **14.6 ms** (EC2 throttled) | Prefix full-text search across 10,000 expenses |
+| **Sequential write throughput** | **29.8 ms** (local) / **89.7 ms** (EC2 throttled) | Sequential HTTP writes against live app |
 | **Database footprint at caps** | **32 MB** (local) / **25 MB** (EC2) | One room at maximum configured limits |
 | **Deploy on the host** | **18 seconds** | `deploy.sh`: build, migrate, swap, smoke test (the whole deploy job: 29 s) |
 
@@ -51,7 +52,15 @@ The load benchmark fills a single group room to its maximum configured capacity 
 - **9,900 settlements**
 - **1,000 reversals**
 
-It clears in-memory LRU snapshot caches before each run, measures snapshot construction, queries history, executes 5 distinct search shapes, and runs 20 sequential HTTP writes against the live application.
+After the bulk load it runs `ANALYZE`, then clears in-memory LRU snapshot caches before each run, measures snapshot construction, queries history, executes 5 distinct search shapes, and runs 20 sequential HTTP writes against the live application.
+
+> [!NOTE]
+> **Why `ANALYZE`.** Straight after a bulk `COPY` the planner's statistics still describe an empty room ("rows=1"), so it
+> picks nested loops and the integrity queries run about 8× slower than they would in a live room, whose statistics
+> autovacuum keeps current as it grows. Earlier runs measured that artifact: **276 ms** snapshot builds, of which
+> **211 ms** was the integrity queries. With statistics refreshed the same build is **49.7 ms** (integrity **38.8 ms**).
+> The searches move the other way (stale statistics happened to favour an index walk that stops at 50 rows), so they
+> are reported as measured with real statistics. The EC2 numbers below predate this step and were not re-measured.
 
 ### Local vs reference comparison
 
@@ -59,19 +68,19 @@ Measured against local Docker Compose on Intel Core i7-13700H:
 
 | Operation | Target Rows | Measured Local Median | SPEC §12 Reference (2 vCPU) |
 |---|---|---|---|
-| **Snapshot build (median of 5 runs, cold cache)** | — | **276.2 ms** | **154 ms** |
-| ↳ Pairwise SQL (`OWED_SQL`) | — | 78.2 ms | 49 ms |
-| ↳ Integrity queries (`INTEGRITY_SQL`) | — | 210.9 ms | 100 ms |
-| ↳ Python plans (Greedy + Exact bitmask DP) | — | 0.4 ms | — |
-| **History page (50 items with keyset cursor)** | 50 | **5.1 ms** | **9 ms** |
-| **Searches median (across 5 query shapes)** | 50 | **10.4 ms** | **10–42 ms** |
-| ↳ Prefix query: `vil` | 50 | 16.5 ms | — |
-| ↳ Two-word prefix query: `seafood din` | 50 | 24.6 ms | — |
-| ↳ Payer filter: `paid_by` | 50 | 4.8 ms | — |
-| ↳ Amount range filter: `50.00`–`70.00` | 50 | 10.4 ms | — |
-| ↳ Deleted items query: `include_deleted=true` | 50 | 9.6 ms | — |
-| **Writes (20 sequential HTTP writes via app)** | — | **48.0 ms** | **22.5 ms** |
-| **Total database size at maximum room caps** | — | **32 MB** | **17.6 MB** |
+| **Snapshot build (median of 5 runs, cold cache)** | — | **49.7 ms** | **154 ms** |
+| ↳ Pairwise SQL (`OWED_SQL`) | — | 20.2 ms | 49 ms |
+| ↳ Integrity queries (`INTEGRITY_SQL`) | — | 38.8 ms | 100 ms |
+| ↳ Python plans (Greedy + Exact bitmask DP) | — | 0.2 ms | — |
+| **History page (50 items with keyset cursor)** | 50 | **3.0 ms** | **9 ms** |
+| **Searches median (across 5 query shapes)** | 50 | **3.0 ms** | **10–42 ms** |
+| ↳ Prefix query: `vil` | 50 | 10.7 ms | — |
+| ↳ Two-word prefix query: `seafood din` | 50 | 17.4 ms | — |
+| ↳ Payer filter: `paid_by` | 50 | 1.9 ms | — |
+| ↳ Amount range filter: `50.00`–`70.00` | 50 | 3.0 ms | — |
+| ↳ Deleted items query: `include_deleted=true` | 50 | 0.8 ms | — |
+| **Writes (20 sequential HTTP writes via app)** | — | **29.8 ms** | **22.5 ms** |
+| **Total database size (whole dev database, room at caps)** | — | **46 MB** | **17.6 MB** |
 
 Ledger invariants (`zero_sum_paise == 0`, `drift == 0`, `bad_split_expenses == 0`, `orphan_edits == 0`) are validated before and after the 20 writes.
 
