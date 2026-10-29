@@ -217,6 +217,7 @@ classDiagram
   class state {
     <<service>>
     +build_snapshot(engine, settings, slug) dict
+    +load_snapshot(engine, settings, slug, if_none_match) gid, dict or None
   }
   class realtime {
     <<module>>
@@ -227,6 +228,7 @@ classDiagram
   class ConnectionManager {
     +rooms dict~int, set~
     +ip_sockets dict~str, set~
+    +socket_ips dict~WebSocket, str~
     +can_connect(group_id, ip) bool
     +connect(group_id, ip, ws)
     +disconnect(group_id, ip, ws)
