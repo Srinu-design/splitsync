@@ -57,6 +57,22 @@
     return (str || '').replace(/[₹,\s]/g, '');
   }
 
+  // Member id -> display name for one snapshot, with a fallback for ids it does not list.
+  function memberNames(members) {
+    const byId = new Map(members.map(m => [m.id, m.name]));
+    return (id, prefix = '#') => byId.get(id) || prefix + id;
+  }
+
+  // Rebuild a member <select> after its first `keep` options, keeping the chosen value.
+  function fillMemberSelect(select, members, { keep = 0, label = name => name, selected = select.value } = {}) {
+    while (select.options.length > keep) select.remove(keep);
+    members.forEach(m => {
+      const option = new Option(label(m.name), String(m.id));
+      option.selected = String(m.id) === selected;
+      select.add(option);
+    });
+  }
+
   function getTodayIsoDate() {
     const d = new Date();
     const year = d.getFullYear();
@@ -179,31 +195,33 @@
     const myGroupsList = document.getElementById('my-groups-list');
     const noGroupsMsg = document.getElementById('no-groups-msg');
 
-    if (startDemoBtn) {
-      startDemoBtn.addEventListener('click', async () => {
-        startDemoBtn.disabled = true;
-        try {
-          const res = await fetch(BASE + 'api/rooms', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ kind: 'DEMO' }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            saveRoomToHistory(data.slug, 'Goa Road Trip', 'DEMO');
-            // DECISION: Build navigation URL from BASE + 'r/' + slug instead of url field verbatim.
-            location.href = BASE + 'r/' + data.slug;
-          } else {
-            const err = await res.json().catch(() => ({}));
-            showToast(err.title || 'Failed to create demo', err.detail || '');
-            startDemoBtn.disabled = false;
-          }
-        } catch (err) {
-          showToast('Network error', err.message);
-          startDemoBtn.disabled = false;
+    // Create a room, remember it in My groups and open it; the button stays disabled meanwhile.
+    async function createRoom(button, body, name, failTitle) {
+      button.disabled = true;
+      try {
+        const res = await fetch(BASE + 'api/rooms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          saveRoomToHistory(data.slug, name, body.kind);
+          // DECISION: Build navigation URL from BASE + 'r/' + slug instead of url field verbatim.
+          location.href = BASE + 'r/' + data.slug;
+          return;
         }
-      });
+        const err = await res.json().catch(() => ({}));
+        showToast(err.title || failTitle, err.detail || '');
+      } catch (err) {
+        showToast('Network error', err.message);
+      }
+      button.disabled = false;
     }
+
+    startDemoBtn?.addEventListener('click', () => {
+      createRoom(startDemoBtn, { kind: 'DEMO' }, 'Goa Road Trip', 'Failed to create demo');
+    });
 
     if (createGroupForm) {
       createGroupForm.addEventListener('submit', async (e) => {
@@ -220,30 +238,7 @@
           return;
         }
 
-        submitBtn.disabled = true;
-        try {
-          const res = await fetch(BASE + 'api/rooms', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              kind: 'GROUP',
-              name: groupName,
-              members: rawMembers,
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            saveRoomToHistory(data.slug, groupName, 'GROUP');
-            location.href = BASE + 'r/' + data.slug;
-          } else {
-            const err = await res.json().catch(() => ({}));
-            showToast(err.title || 'Failed to create group', err.detail || '');
-            submitBtn.disabled = false;
-          }
-        } catch (err) {
-          showToast('Network error', err.message);
-          submitBtn.disabled = false;
-        }
+        createRoom(submitBtn, { kind: 'GROUP', name: groupName, members: rawMembers }, groupName, 'Failed to create group');
       });
     }
 
@@ -393,6 +388,10 @@
     let currentLineageFilter = null;
     // Lineages already shown in the feed (newest first): a delete below a newer item for its lineage is no longer undoable.
     let feedSeenLineages = new Set();
+    let nameOf = id => '#' + id;
+    // Member list behind the selects and split inputs; rebuilt only when it changes, so a
+    // snapshot from someone else's write never wipes a form being filled in.
+    let membersKey = null;
 
     const copyBtn = document.getElementById('copy-link-btn');
     if (copyBtn) {
@@ -480,7 +479,8 @@
           const msg = JSON.parse(event.data);
           if (msg.type === 'snapshot' && msg.state) {
             if (msg.version > currentVersion) {
-              currentVersion = msg.version;
+              // Same ETag the state route sends, so the next poll is a cheap 304.
+              lastETag = '"v' + msg.version + '"';
               renderState(msg.state);
             }
           }
@@ -539,10 +539,7 @@
         if (res.ok) {
           lastETag = res.headers.get('ETag');
           const data = await res.json();
-          if (data.room && data.room.graph_version > currentVersion) {
-            currentVersion = data.room.graph_version;
-            renderState(data);
-          }
+          if (data.room && data.room.graph_version > currentVersion) renderState(data);
         }
       } catch (_) {}
     }
@@ -625,6 +622,18 @@
       }
     }
 
+    // Expense and settlement writes: one new Idempotency-Key per user action (apiRequest reuses
+    // it on its GROUP_BUSY retry) plus the self-reported acting member.
+    function writeRequest(path, method, body) {
+      const headers = { 'Idempotency-Key': generateIdempotencyKey(), ...getActingMemberHeader() };
+      if (body !== undefined) headers['Content-Type'] = 'application/json';
+      return apiRequest('api/rooms/' + slug + '/' + path, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    }
+
     // ==========================================
     // RENDER STATE
     // ==========================================
@@ -634,12 +643,13 @@
       document.getElementById('room-not-found-msg')?.classList.add('hidden');
       document.getElementById('room-main')?.setAttribute('aria-busy', 'false');
       document.title = snapshot.room.name + ' · SplitSync';
+      if (!currentSnapshot) saveRoomToHistory(slug, snapshot.room.name, snapshot.room.kind);
       currentSnapshot = snapshot;
       currentVersion = snapshot.room.graph_version;
-      saveRoomToHistory(slug, snapshot.room.name, snapshot.room.kind);
-
-      const memberMap = new Map();
-      snapshot.members.forEach(m => memberMap.set(m.id, m));
+      nameOf = memberNames(snapshot.members);
+      const nextMembersKey = snapshot.members.map(m => m.id + ':' + m.name).join('|');
+      const membersChanged = nextMembersKey !== membersKey;
+      membersKey = nextMembersKey;
 
       // 1. Status Bar
       const titleEl = document.getElementById('room-title');
@@ -685,8 +695,7 @@
           if (drifted.length > 0) {
             driftBadge.textContent = drifted.map(d => {
               const sign = d.drift_paise > 0 ? '+' : '−';
-              const memberName = memberMap.get(d.member_id)?.name || ('Member #' + d.member_id);
-              return memberName + ' ' + sign + formatMoney(Math.abs(d.drift_paise));
+              return nameOf(d.member_id, 'Member #') + ' ' + sign + formatMoney(Math.abs(d.drift_paise));
             }).join(' · ');
           } else {
             driftBadge.textContent = 'Drift: ' + formatMoney(driftTotal);
@@ -694,88 +703,57 @@
         }
       }
 
-      // Populate Acting Member picker
-      if (actingPicker) {
-        const storedVal = getStoredActingMember(slug);
-        while (actingPicker.firstChild) {
-          actingPicker.removeChild(actingPicker.firstChild);
-        }
-        const anonOpt = document.createElement('option');
-        anonOpt.value = '';
-        anonOpt.textContent = 'I am: Someone';
-        actingPicker.appendChild(anonOpt);
-
-        snapshot.members.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m.id.toString();
-          opt.textContent = 'I am: ' + m.name;
-          if (m.id.toString() === storedVal) {
-            opt.selected = true;
-          }
-          actingPicker.appendChild(opt);
+      if (actingPicker && membersChanged) {
+        fillMemberSelect(actingPicker, snapshot.members, {
+          keep: 1,
+          label: name => 'I am: ' + name,
+          selected: getStoredActingMember(slug),
         });
       }
+      document.getElementById('reset-room-btn')?.classList.toggle('hidden', snapshot.room.kind !== 'DEMO');
 
-      // Reset Room button (demo only)
-      const resetBtn = document.getElementById('reset-room-btn');
-      if (resetBtn) {
-        if (snapshot.room.kind === 'DEMO') {
-          resetBtn.classList.remove('hidden');
-          resetBtn.onclick = async () => {
-            resetBtn.disabled = true;
-            try {
-              const res = await apiRequest('api/rooms/' + slug + '/reset', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  ...getActingMemberHeader(),
-                },
-              });
-              if (res.ok) {
-                const newSnap = await res.json();
-                renderState(newSnap);
-                showToast('Room reset', 'Reset back to demo seed balances.');
-              }
-            } finally {
-              resetBtn.disabled = false;
-            }
-          };
-        } else {
-          resetBtn.classList.add('hidden');
-        }
-      }
-
-      // 2. Graphs Section
-      renderGraphsSection(snapshot, memberMap);
-
-      // 3. Balances
+      renderGraphsSection(snapshot);
       renderBalancesSection(snapshot);
-
-      // 4. Expenses List
-      renderExpensesList(snapshot, memberMap);
-
-      // 5. Add / Edit Expense Form member select and split options
-      populateExpenseFormDropdowns(snapshot);
-
-      // 6. Settlements Section
-      renderSettlementsSection(snapshot, memberMap);
-
-      // 7. Activity Feed: reload from top on snapshot updates so items are newest-first and never duplicated
-      loadHistoryFeed(true);
-
-      // 8. Search Panel dropdowns
-      populateSearchDropdowns(snapshot);
-
-      // 9. Chaos Panel (demo only)
+      renderExpensesList(snapshot);
+      populateExpenseForm(snapshot, membersChanged);
+      renderSettlementsSection(snapshot, membersChanged);
+      // The feed reloads from the top so items stay newest-first; a closed drawer reloads on open.
+      if (activeDialog?.panel.id === 'history-drawer') loadHistoryFeed(true);
+      if (membersChanged) populateSearchDropdowns(snapshot);
       renderChaosPanel(snapshot);
     }
 
+    // Reset Room (demo rooms only; the button is hidden otherwise)
+    const resetBtn = document.getElementById('reset-room-btn');
+    resetBtn?.addEventListener('click', async () => {
+      resetBtn.disabled = true;
+      try {
+        const res = await apiRequest('api/rooms/' + slug + '/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...getActingMemberHeader() },
+        });
+        if (res.ok) {
+          renderState(await res.json());
+          showToast('Room reset', 'Reset back to demo seed balances.');
+        }
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+
+    const optBtn = document.getElementById('toggle-optimal-btn');
+    const greedyBtn = document.getElementById('toggle-greedy-btn');
+    [[optBtn, 'OPTIMAL'], [greedyBtn, 'GREEDY']].forEach(([button, type]) => {
+      button?.addEventListener('click', () => {
+        activePlanType = type;
+        if (currentSnapshot) renderGraphsSection(currentSnapshot);
+      });
+    });
+
     // Render Graphs Section
-    function renderGraphsSection(snapshot, memberMap) {
+    function renderGraphsSection(snapshot) {
       const summaryLine = document.getElementById('graph-summary-line');
       const fallbackNote = document.getElementById('greedy-fallback-note');
-      const optBtn = document.getElementById('toggle-optimal-btn');
-      const greedyBtn = document.getElementById('toggle-greedy-btn');
       const svgContainer = document.getElementById('graph-svg-container');
       const listContainer = document.getElementById('graph-list-container');
       const pairwiseWrap = document.getElementById('pairwise-svg-wrap');
@@ -795,24 +773,12 @@
       }
 
       if (optBtn && greedyBtn) {
-        if (!isOptimalAvailable) {
-          optBtn.disabled = true;
-          optBtn.className = 'btn btn-sm btn-secondary';
-          greedyBtn.className = 'btn btn-sm btn-primary';
-        } else {
-          optBtn.disabled = false;
-          optBtn.className = activePlanType === 'OPTIMAL' ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary';
-          greedyBtn.className = activePlanType === 'GREEDY' ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary';
-
-          optBtn.onclick = () => {
-            activePlanType = 'OPTIMAL';
-            renderGraphsSection(snapshot, memberMap);
-          };
-          greedyBtn.onclick = () => {
-            activePlanType = 'GREEDY';
-            renderGraphsSection(snapshot, memberMap);
-          };
-        }
+        optBtn.disabled = !isOptimalAvailable;
+        [[optBtn, 'OPTIMAL'], [greedyBtn, 'GREEDY']].forEach(([button, type]) => {
+          const pressed = activePlanType === type;
+          button.className = 'btn btn-sm ' + (pressed ? 'btn-primary' : 'btn-secondary');
+          button.setAttribute('aria-pressed', String(pressed));
+        });
       }
 
       const pairwiseCount = snapshot.graph.pairwise.count;
@@ -830,10 +796,10 @@
       const activePlanEdges = (activePlanType === 'OPTIMAL' && isOptimalAvailable)
         ? snapshot.graph.optimal.edges
         : (snapshot.graph.greedy ? snapshot.graph.greedy.edges : []);
+      const planLabel = activePlanType === 'OPTIMAL' && isOptimalAvailable ? 'Optimal plan' : 'Greedy plan';
       document.getElementById('pairwise-count').textContent = pairwiseCount;
       document.getElementById('plan-count').textContent = activePlanEdges.length;
-      document.getElementById('plan-heading').textContent =
-        activePlanType === 'OPTIMAL' && isOptimalAvailable ? 'Optimal plan' : 'Greedy plan';
+      document.getElementById('plan-heading').textContent = planLabel;
 
       // If <= 15 members: SVG mode. If > 15 members: List mode.
       if (snapshot.members.length <= 15) {
@@ -854,7 +820,7 @@
             snapshot.members,
             activePlanEdges,
             true,
-            (activePlanType === 'OPTIMAL' ? 'Optimal Plan (' : 'Greedy Plan (') + activePlanEdges.length + ')',
+            planLabel + ' (' + activePlanEdges.length + ')',
             'Recommended transfers to settle all debts'
           );
         }
@@ -862,45 +828,28 @@
         if (svgContainer) svgContainer.classList.add('hidden');
         if (listContainer) listContainer.classList.remove('hidden');
 
-        const iousList = document.getElementById('large-ious-list');
-        const planList = document.getElementById('large-plan-list');
-        if (iousList) {
-          while (iousList.firstChild) iousList.removeChild(iousList.firstChild);
-          const top20 = (snapshot.graph.pairwise.edges || []).slice(0, 20);
-          top20.forEach(edge => {
+        const fillEdgeList = (list, edges, verb) => {
+          list?.replaceChildren(...edges.map(edge => {
             const li = document.createElement('li');
             li.className = 'plan-step-item';
-            const fromName = memberMap.get(edge.from)?.name || '#' + edge.from;
-            const toName = memberMap.get(edge.to)?.name || '#' + edge.to;
-            li.textContent = fromName + ' owes ' + toName + ' ' + formatMoney(edge.amount_paise);
-            iousList.appendChild(li);
-          });
-        }
-        if (planList) {
-          while (planList.firstChild) planList.removeChild(planList.firstChild);
-          activePlanEdges.forEach(edge => {
-            const li = document.createElement('li');
-            li.className = 'plan-step-item';
-            const fromName = memberMap.get(edge.from)?.name || '#' + edge.from;
-            const toName = memberMap.get(edge.to)?.name || '#' + edge.to;
-            li.textContent = fromName + ' pays ' + toName + ' ' + formatMoney(edge.amount_paise);
-            planList.appendChild(li);
-          });
-        }
+            li.textContent = nameOf(edge.from) + verb + nameOf(edge.to) + ' ' + formatMoney(edge.amount_paise);
+            return li;
+          }));
+        };
+        fillEdgeList(document.getElementById('large-ious-list'), (snapshot.graph.pairwise.edges || []).slice(0, 20), ' owes ');
+        fillEdgeList(document.getElementById('large-plan-list'), activePlanEdges, ' pays ');
       }
 
       // Details Drawer: Optimal Groups or Greedy Steps
       if (planDetailsSummary && planDetailsContent) {
-        while (planDetailsContent.firstChild) {
-          planDetailsContent.removeChild(planDetailsContent.firstChild);
-        }
+        planDetailsContent.replaceChildren();
 
         if (activePlanType === 'OPTIMAL' && isOptimalAvailable) {
           planDetailsSummary.textContent = 'View optimal groups (' + (snapshot.graph.optimal.groups || []).length + ')';
           (snapshot.graph.optimal.groups || []).forEach((grp, idx) => {
             const item = document.createElement('div');
             item.className = 'plan-group-item';
-            const names = grp.map(id => memberMap.get(id)?.name || '#' + id).join(', ');
+            const names = grp.map(id => nameOf(id)).join(', ');
             item.textContent = 'Group ' + (idx + 1) + ': [' + names + ']';
             planDetailsContent.appendChild(item);
           });
@@ -909,8 +858,8 @@
           (snapshot.graph.greedy?.steps || []).forEach(step => {
             const item = document.createElement('div');
             item.className = 'plan-step-item';
-            const debtor = memberMap.get(step.debtor)?.name || '#' + step.debtor;
-            const creditor = memberMap.get(step.creditor)?.name || '#' + step.creditor;
+            const debtor = nameOf(step.debtor);
+            const creditor = nameOf(step.creditor);
             const debtStr = formatMoney(step.debt_paise);
             const credStr = formatMoney(step.credit_paise);
             const amtStr = formatMoney(step.amount_paise);
@@ -928,9 +877,7 @@
     function renderBalancesSection(snapshot) {
       const balancesContainer = document.getElementById('balances-list');
       if (!balancesContainer) return;
-      while (balancesContainer.firstChild) {
-        balancesContainer.removeChild(balancesContainer.firstChild);
-      }
+      balancesContainer.replaceChildren();
 
       const maxAbs = Math.max(1, ...snapshot.members.map(m => Math.abs(m.net_balance_paise || 0)));
       snapshot.members.forEach(m => {
@@ -942,9 +889,8 @@
 
         const dot = document.createElement('span');
         dot.className = 'balance-dot';
-        dot.style.setProperty('--member-color', m.color || '#2563eb');
         // DECISION: Use CSSOM setProperty for dynamic member color variable, complying with CSP.
-        dot.style.backgroundColor = m.color || '#2563eb';
+        dot.style.setProperty('--member-color', m.color || '#2563eb');
         nameRow.appendChild(dot);
 
         const nameSpan = document.createElement('span');
@@ -964,34 +910,15 @@
         track.append(zero, bar);
         card.appendChild(track);
 
+        const [tone, sign, note] = net > 0 ? ['balance-positive', '+', '(owed)']
+          : net < 0 ? ['balance-negative', '−', '(owes)'] : ['balance-zero', '', '(settled)'];
         const amountRow = document.createElement('div');
-        amountRow.className = 'balance-amount';
-
-        if (net > 0) {
-          amountRow.classList.add('balance-positive');
-          amountRow.textContent = '+' + formatMoney(net);
-
-          const signText = document.createElement('span');
-          signText.className = 'balance-sign-text';
-          signText.textContent = '(owed)';
-          amountRow.appendChild(signText);
-        } else if (net < 0) {
-          amountRow.classList.add('balance-negative');
-          amountRow.textContent = '−' + formatMoney(Math.abs(net));
-
-          const signText = document.createElement('span');
-          signText.className = 'balance-sign-text';
-          signText.textContent = '(owes)';
-          amountRow.appendChild(signText);
-        } else {
-          amountRow.classList.add('balance-zero');
-          amountRow.textContent = '₹0.00';
-
-          const signText = document.createElement('span');
-          signText.className = 'balance-sign-text';
-          signText.textContent = '(settled)';
-          amountRow.appendChild(signText);
-        }
+        amountRow.className = 'balance-amount ' + tone;
+        amountRow.textContent = sign + formatMoney(Math.abs(net));
+        const signText = document.createElement('span');
+        signText.className = 'balance-sign-text';
+        signText.textContent = note;
+        amountRow.appendChild(signText);
         card.appendChild(amountRow);
 
         balancesContainer.appendChild(card);
@@ -999,20 +926,10 @@
     }
 
     // Render Expenses List
-    function renderExpensesList(snapshot, memberMap) {
+    function renderExpensesList(snapshot) {
       const expensesList = document.getElementById('expenses-list');
       if (!expensesList) return;
-      while (expensesList.firstChild) {
-        expensesList.removeChild(expensesList.firstChild);
-      }
-
-      const openSearchBtn = document.getElementById('open-search-btn');
-      if (openSearchBtn) {
-        openSearchBtn.onclick = () => {
-          const panel = document.getElementById('search-panel');
-          if (panel) panel.classList.remove('hidden');
-        };
-      }
+      expensesList.replaceChildren();
 
       snapshot.expenses.forEach(exp => {
         const li = document.createElement('li');
@@ -1040,9 +957,8 @@
         const metaRow = document.createElement('div');
         metaRow.className = 'item-meta';
 
-        const payerName = memberMap.get(exp.paid_by)?.name || ('Member #' + exp.paid_by);
         const payerSpan = document.createElement('span');
-        payerSpan.textContent = 'Paid by ' + payerName;
+        payerSpan.textContent = 'Paid by ' + nameOf(exp.paid_by, 'Member #');
         metaRow.appendChild(payerSpan);
 
         if (exp.spent_on) {
@@ -1057,10 +973,7 @@
         if (exp.shares && exp.shares.length > 0) {
           const sharesRow = document.createElement('div');
           sharesRow.className = 'item-meta item-shares';
-          const shareParts = exp.shares.map(s => {
-            const mName = memberMap.get(s.member_id)?.name || ('#' + s.member_id);
-            return mName + ' ' + formatMoney(s.share_paise);
-          });
+          const shareParts = exp.shares.map(s => nameOf(s.member_id) + ' ' + formatMoney(s.share_paise));
           sharesRow.textContent = shareParts.join(' · ');
           mainDiv.appendChild(sharesRow);
         }
@@ -1090,36 +1003,14 @@
         deleteBtn.textContent = 'Delete';
         deleteBtn.onclick = async () => {
           deleteBtn.disabled = true;
-          const key = generateIdempotencyKey();
           try {
-            const res = await apiRequest('api/rooms/' + slug + '/expenses/' + exp.id, {
-              method: 'DELETE',
-              headers: {
-                'Idempotency-Key': key,
-                ...getActingMemberHeader(),
-              },
-            });
+            const res = await writeRequest('expenses/' + exp.id, 'DELETE');
             if (res.ok) {
               // 10 s toast "Deleted '<title>' — Undo" (restore with a new key)
-              showToast(
-                "Deleted '" + exp.title + "'",
-                '',
-                'Undo',
-                async () => {
-                  const restoreKey = generateIdempotencyKey();
-                  const restoreRes = await apiRequest('api/rooms/' + slug + '/expenses/' + exp.id + '/restore', {
-                    method: 'POST',
-                    headers: {
-                      'Idempotency-Key': restoreKey,
-                      ...getActingMemberHeader(),
-                    },
-                  });
-                  if (restoreRes.ok) {
-                    showToast("Restored '" + exp.title + "'");
-                  }
-                },
-                10000
-              );
+              showToast("Deleted '" + exp.title + "'", '', 'Undo', async () => {
+                const restoreRes = await writeRequest('expenses/' + exp.id + '/restore', 'POST');
+                if (restoreRes.ok) showToast("Restored '" + exp.title + "'");
+              }, 10000);
             }
           } finally {
             deleteBtn.disabled = false;
@@ -1132,10 +1023,10 @@
         histBtn.type = 'button';
         histBtn.className = 'btn btn-sm btn-secondary';
         histBtn.textContent = 'History';
+        histBtn.setAttribute('aria-haspopup', 'dialog');
         histBtn.onclick = () => {
           currentLineageFilter = exp.lineage_id;
-          const drawer = document.getElementById('history-drawer');
-          if (drawer) drawer.scrollIntoView({ behavior: 'smooth' });
+          openRoomDialog('history-drawer', histBtn);
           loadHistoryFeed(true);
         };
         actionsDiv.appendChild(histBtn);
@@ -1145,79 +1036,44 @@
       });
     }
 
-    // Populate Expense Form Dropdowns and Split List
-    function populateExpenseFormDropdowns(snapshot) {
-      const payerSelect = document.getElementById('expense-payer-select');
-      const splitContainer = document.getElementById('split-members-list');
+    // Expense form: payer list and split rows follow the member list, never a plain snapshot.
+    function populateExpenseForm(snapshot, membersChanged) {
       const dateInput = document.getElementById('expense-date-input');
-
-      if (dateInput && !dateInput.value) {
-        dateInput.value = getTodayIsoDate();
+      if (dateInput && !dateInput.value) dateInput.value = getTodayIsoDate();
+      if (membersChanged) {
+        const payerSelect = document.getElementById('expense-payer-select');
+        if (payerSelect) fillMemberSelect(payerSelect, snapshot.members);
+        renderSplitMembersInput(snapshot);
       }
-
-      if (payerSelect) {
-        const curVal = payerSelect.value;
-        while (payerSelect.firstChild) payerSelect.removeChild(payerSelect.firstChild);
-        snapshot.members.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m.id.toString();
-          opt.textContent = m.name;
-          if (curVal && m.id.toString() === curVal) opt.selected = true;
-          payerSelect.appendChild(opt);
-        });
-      }
-
-      renderSplitMembersInput(snapshot);
-
-      // Demo shortcut button
-      const demoBtn = document.getElementById('demo-shortcut-btn');
-      if (demoBtn) {
-        if (snapshot.room.kind === 'DEMO') {
-          demoBtn.classList.remove('hidden');
-          demoBtn.onclick = async () => {
-            demoBtn.disabled = true;
-            try {
-              const rohan = snapshot.members.find(m => m.name.toLowerCase() === 'rohan');
-              const sneha = snapshot.members.find(m => m.name.toLowerCase() === 'sneha');
-              const karthik = snapshot.members.find(m => m.name.toLowerCase() === 'karthik');
-
-              if (!rohan || !sneha || !karthik) {
-                showToast('Shortcut unavailable', 'Demo members Rohan, Sneha, or Karthik not found.');
-                return;
-              }
-
-              const key = generateIdempotencyKey();
-              const res = await apiRequest('api/rooms/' + slug + '/expenses', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Idempotency-Key': key,
-                  ...getActingMemberHeader(),
-                },
-                body: JSON.stringify({
-                  title: 'Demo split ₹100',
-                  paid_by: rohan.id,
-                  amount: '100',
-                  spent_on: getTodayIsoDate(),
-                  split: {
-                    type: 'EQUAL',
-                    members: [{ id: rohan.id }, { id: sneha.id }, { id: karthik.id }],
-                  },
-                }),
-              });
-              if (res.ok) {
-                showToast('Added demo expense', '₹100 split 3 ways (Rohan, Sneha, Karthik)');
-                resetExpenseForm();
-              }
-            } finally {
-              demoBtn.disabled = false;
-            }
-          };
-        } else {
-          demoBtn.classList.add('hidden');
-        }
-      }
+      demoBtn?.classList.toggle('hidden', snapshot.room.kind !== 'DEMO');
     }
+
+    // Demo shortcut: ₹100 paid by Rohan, split equally with Sneha and Karthik
+    const demoBtn = document.getElementById('demo-shortcut-btn');
+    demoBtn?.addEventListener('click', async () => {
+      const byName = name => currentSnapshot?.members.find(m => m.name.toLowerCase() === name);
+      const [rohan, sneha, karthik] = ['rohan', 'sneha', 'karthik'].map(byName);
+      if (!rohan || !sneha || !karthik) {
+        showToast('Shortcut unavailable', 'Demo members Rohan, Sneha, or Karthik not found.');
+        return;
+      }
+      demoBtn.disabled = true;
+      try {
+        const res = await writeRequest('expenses', 'POST', {
+          title: 'Demo split ₹100',
+          paid_by: rohan.id,
+          amount: '100',
+          spent_on: getTodayIsoDate(),
+          split: { type: 'EQUAL', members: [{ id: rohan.id }, { id: sneha.id }, { id: karthik.id }] },
+        });
+        if (res.ok) {
+          showToast('Added demo expense', '₹100 split 3 ways (Rohan, Sneha, Karthik)');
+          resetExpenseForm();
+        }
+      } finally {
+        demoBtn.disabled = false;
+      }
+    });
 
     // Render Split Members inputs according to Split Type
     function renderSplitMembersInput(snapshot, existingSplits = null, splitTypeOverride = null) {
@@ -1230,9 +1086,7 @@
         if (splitTypeRadios[i].checked) currentType = splitTypeRadios[i].value;
       }
 
-      while (splitContainer.firstChild) {
-        splitContainer.removeChild(splitContainer.firstChild);
-      }
+      splitContainer.replaceChildren();
 
       snapshot.members.forEach(m => {
         const row = document.createElement('div');
@@ -1411,44 +1265,15 @@
         };
 
         submitBtn.disabled = true;
-        const key = generateIdempotencyKey();
-
         try {
-          if (editingId) {
-            // Edit: PUT /api/rooms/{slug}/expenses/{id}
-            const res = await apiRequest('api/rooms/' + slug + '/expenses/' + editingId, {
-              method: 'PUT',
-              headers: {
-                'Content-Type': 'application/json',
-                'Idempotency-Key': key,
-                ...getActingMemberHeader(),
-              },
-              body: JSON.stringify(body),
-            });
-            if (res.ok) {
-              const data = await res.json().catch(() => ({}));
-              if (data.unchanged) {
-                showToast('No changes', 'Expense content was unchanged.');
-              } else {
-                showToast('Expense updated', title);
-              }
-              resetExpenseForm();
-            }
-          } else {
-            // Add: POST /api/rooms/{slug}/expenses
-            const res = await apiRequest('api/rooms/' + slug + '/expenses', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Idempotency-Key': key,
-                ...getActingMemberHeader(),
-              },
-              body: JSON.stringify(body),
-            });
-            if (res.ok) {
-              showToast('Expense added', title);
-              resetExpenseForm();
-            }
+          const res = editingId
+            ? await writeRequest('expenses/' + editingId, 'PUT', body)
+            : await writeRequest('expenses', 'POST', body);
+          if (res.ok) {
+            const data = editingId ? await res.json().catch(() => ({})) : {};
+            if (data.unchanged) showToast('No changes', 'Expense content was unchanged.');
+            else showToast(editingId ? 'Expense updated' : 'Expense added', title);
+            resetExpenseForm();
           }
         } finally {
           submitBtn.disabled = false;
@@ -1457,50 +1282,36 @@
     }
 
     // 6. Settlements Section
-    function renderSettlementsSection(snapshot, memberMap) {
+    function renderSettlementsSection(snapshot, membersChanged) {
       const fromSelect = document.getElementById('settlement-from-select');
       const toSelect = document.getElementById('settlement-to-select');
       const amtInput = document.getElementById('settlement-amount-input');
       const settlementsList = document.getElementById('settlements-list');
 
       if (fromSelect && toSelect) {
-        const curFrom = fromSelect.value;
-        const curTo = toSelect.value;
-        while (fromSelect.firstChild) fromSelect.removeChild(fromSelect.firstChild);
-        while (toSelect.firstChild) toSelect.removeChild(toSelect.firstChild);
+        if (membersChanged) {
+          fillMemberSelect(fromSelect, snapshot.members);
+          fillMemberSelect(toSelect, snapshot.members);
+        }
 
-        snapshot.members.forEach(m => {
-          const opt1 = document.createElement('option');
-          opt1.value = m.id.toString();
-          opt1.textContent = m.name;
-          if (curFrom && m.id.toString() === curFrom) opt1.selected = true;
-          fromSelect.appendChild(opt1);
-
-          const opt2 = document.createElement('option');
-          opt2.value = m.id.toString();
-          opt2.textContent = m.name;
-          if (curTo && m.id.toString() === curTo) opt2.selected = true;
-          toSelect.appendChild(opt2);
-        });
-
-        // Pre-fill from plan if input is empty and plan transfers exist
+        // Pre-fill the plan's first transfer and keep it current until the user edits the form,
+        // so a prefilled amount never goes stale and exceeds the debt after other writes.
         const planEdges = (snapshot.graph.optimal?.edges && snapshot.graph.optimal.edges.length > 0)
           ? snapshot.graph.optimal.edges
           : (snapshot.graph.greedy?.edges || []);
-
-        if (amtInput && (!amtInput.value || amtInput.value === '0.00') && planEdges.length > 0) {
+        const untouched = settlementPrefilled || !amtInput?.value || amtInput.value === '0.00';
+        if (amtInput && untouched && planEdges.length > 0) {
           const firstEdge = planEdges[0];
           fromSelect.value = firstEdge.from.toString();
           toSelect.value = firstEdge.to.toString();
           amtInput.value = (firstEdge.amount_paise / 100).toFixed(2);
+          settlementPrefilled = true;
         }
       }
 
       // Render settlements list
       if (settlementsList) {
-        while (settlementsList.firstChild) {
-          settlementsList.removeChild(settlementsList.firstChild);
-        }
+        settlementsList.replaceChildren();
 
         snapshot.settlements.forEach(settlement => {
           const li = document.createElement('li');
@@ -1509,8 +1320,8 @@
           const mainDiv = document.createElement('div');
           mainDiv.className = 'item-main';
 
-          const fromName = memberMap.get(settlement.from_member)?.name || '#' + settlement.from_member;
-          const toName = memberMap.get(settlement.to_member)?.name || '#' + settlement.to_member;
+          const fromName = nameOf(settlement.from_member);
+          const toName = nameOf(settlement.to_member);
 
           const titleRow = document.createElement('div');
           titleRow.className = 'item-title-row';
@@ -1564,15 +1375,8 @@
             } else {
               clearTimeout(confirmTimer);
               deleteBtn.disabled = true;
-              const key = generateIdempotencyKey();
               try {
-                const res = await apiRequest('api/rooms/' + slug + '/settlements/' + settlement.id, {
-                  method: 'DELETE',
-                  headers: {
-                    'Idempotency-Key': key,
-                    ...getActingMemberHeader(),
-                  },
-                });
+                const res = await writeRequest('settlements/' + settlement.id, 'DELETE');
                 if (res.ok) {
                   showToast('Settlement deleted', fromName + ' → ' + toName);
                 }
@@ -1591,7 +1395,14 @@
 
     // Settlement Form Submit
     const settlementForm = document.getElementById('settlement-form');
+    let settlementPrefilled = false;
     if (settlementForm) {
+      // Any edit by the user stops the plan from overwriting the form.
+      ['input', 'change'].forEach(type => {
+        settlementForm.addEventListener(type, event => {
+          if (event.isTrusted) settlementPrefilled = false;
+        });
+      });
       settlementForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const fromVal = parseInt(document.getElementById('settlement-from-select').value, 10);
@@ -1606,26 +1417,18 @@
         }
 
         submitBtn.disabled = true;
-        const key = generateIdempotencyKey();
-
         try {
-          const res = await apiRequest('api/rooms/' + slug + '/settlements', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Idempotency-Key': key,
-              ...getActingMemberHeader(),
-            },
-            body: JSON.stringify({
-              from_member: fromVal,
-              to_member: toVal,
-              amount: cleanAmt,
-              expected_graph_version: currentSnapshot ? currentSnapshot.room.graph_version : 0,
-              mode: 'PROTECTED',
-            }),
+          const res = await writeRequest('settlements', 'POST', {
+            from_member: fromVal,
+            to_member: toVal,
+            amount: cleanAmt,
+            expected_graph_version: currentSnapshot ? currentSnapshot.room.graph_version : 0,
+            mode: 'PROTECTED',
           });
           if (res.ok) {
-            showToast('Settlement recorded', '₹' + cleanAmt);
+            settlementPrefilled = true; // the next snapshot pre-fills the plan's next transfer
+            const receipt = await res.json().catch(() => ({}));
+            showToast('Settlement recorded', nameOf(fromVal) + ' → ' + nameOf(toVal) + ' ' + formatMoney(receipt.amount_paise));
           }
         } finally {
           submitBtn.disabled = false;
@@ -1696,12 +1499,9 @@
           }
 
           if (reset) {
-            while (feedList.firstChild) feedList.removeChild(feedList.firstChild);
+            feedList.replaceChildren();
             feedSeenLineages = new Set();
           }
-
-          const memberMap = new Map();
-          if (currentSnapshot) currentSnapshot.members.forEach(m => memberMap.set(m.id, m));
 
           data.items.forEach(item => {
             const li = document.createElement('li');
@@ -1725,8 +1525,7 @@
               // Actor label: self-reported tooltip or "Someone"
               const actorSpan = document.createElement('span');
               if (item.acted_by) {
-                const m = memberMap.get(item.acted_by);
-                actorSpan.textContent = m ? m.name : ('Member #' + item.acted_by);
+                actorSpan.textContent = nameOf(item.acted_by, 'Member #');
                 actorSpan.title = 'self-reported';
               } else {
                 actorSpan.textContent = 'Someone';
@@ -1751,13 +1550,9 @@
                   undoExpenseId = item.expense_id;
                 }
               } else if (item.type === 'SETTLEMENT_RECORDED') {
-                const from = memberMap.get(item.from)?.name || '#' + item.from;
-                const to = memberMap.get(item.to)?.name || '#' + item.to;
-                contentSpan.textContent += 'recorded settlement: ' + from + ' paid ' + to + ' ' + formatMoney(item.amount_paise);
+                contentSpan.textContent += 'recorded settlement: ' + nameOf(item.from) + ' paid ' + nameOf(item.to) + ' ' + formatMoney(item.amount_paise);
               } else if (item.type === 'SETTLEMENT_DELETED') {
-                const from = memberMap.get(item.from)?.name || '#' + item.from;
-                const to = memberMap.get(item.to)?.name || '#' + item.to;
-                contentSpan.textContent += 'deleted settlement: ' + from + ' → ' + to + ' ' + formatMoney(item.amount_paise);
+                contentSpan.textContent += 'deleted settlement: ' + nameOf(item.from) + ' → ' + nameOf(item.to) + ' ' + formatMoney(item.amount_paise);
               }
               textLine.appendChild(contentSpan);
             }
@@ -1778,17 +1573,14 @@
               undoBtn.textContent = 'Undo';
               undoBtn.onclick = async () => {
                 undoBtn.disabled = true;
-                const key = generateIdempotencyKey();
-                const rRes = await apiRequest('api/rooms/' + slug + '/expenses/' + undoExpenseId + '/restore', {
-                  method: 'POST',
-                  headers: {
-                    'Idempotency-Key': key,
-                    ...getActingMemberHeader(),
-                  },
-                });
-                if (rRes.ok) {
-                  showToast('Expense restored');
-                  loadHistoryFeed(true);
+                try {
+                  const rRes = await writeRequest('expenses/' + undoExpenseId + '/restore', 'POST');
+                  if (rRes.ok) {
+                    showToast('Expense restored');
+                    loadHistoryFeed(true);
+                  }
+                } finally {
+                  undoBtn.disabled = false;
                 }
               };
               li.appendChild(undoBtn);
@@ -1797,19 +1589,17 @@
             feedList.appendChild(li);
           });
         }
-      } catch (err) {
-        if (err.name !== 'AbortError') {
-          // ignore network abort
-        }
+      } catch (_) {
+        // Aborted by a newer load, or offline: the next snapshot or Load more tries again.
       }
     }
 
-    // 8. Search Panel
-    const searchPanel = document.getElementById('search-panel');
-    const closeSearchBtn = document.getElementById('close-search-btn');
-    if (closeSearchBtn && searchPanel) {
-      closeSearchBtn.onclick = () => searchPanel.classList.add('hidden');
-    }
+    // 8. Search Panel: opening it lists the newest matches straight away.
+    document.getElementById('open-search-btn')?.addEventListener('click', event => {
+      openRoomDialog('search-panel', event.currentTarget);
+      executeSearch(true);
+    });
+    document.getElementById('close-search-btn')?.addEventListener('click', () => closeRoomDialog());
 
     const searchInput = document.getElementById('search-query-input');
     const paidBySelect = document.getElementById('search-paid-by-select');
@@ -1822,37 +1612,15 @@
     const searchLoadMoreBtn = document.getElementById('search-load-more-btn');
 
     function populateSearchDropdowns(snapshot) {
-      if (paidBySelect) {
-        const cur = paidBySelect.value;
-        while (paidBySelect.options.length > 1) paidBySelect.remove(1);
-        snapshot.members.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m.id.toString();
-          opt.textContent = m.name;
-          if (cur && m.id.toString() === cur) opt.selected = true;
-          paidBySelect.appendChild(opt);
-        });
-      }
-      if (involvingSelect) {
-        const cur = involvingSelect.value;
-        while (involvingSelect.options.length > 1) involvingSelect.remove(1);
-        snapshot.members.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m.id.toString();
-          opt.textContent = m.name;
-          if (cur && m.id.toString() === cur) opt.selected = true;
-          involvingSelect.appendChild(opt);
-        });
-      }
+      [paidBySelect, involvingSelect].forEach(select => {
+        if (select) fillMemberSelect(select, snapshot.members, { keep: 1 });
+      });
     }
 
     async function executeSearch(reset = true) {
       if (reset) {
         searchNextCursor = null;
-        const resultsList = document.getElementById('search-results-list');
-        if (resultsList) {
-          while (resultsList.firstChild) resultsList.removeChild(resultsList.firstChild);
-        }
+        document.getElementById('search-results-list')?.replaceChildren();
       }
 
       if (searchAbortController) {
@@ -1887,9 +1655,6 @@
           const resultsList = document.getElementById('search-results-list');
           if (!resultsList) return;
 
-          const memberMap = new Map();
-          if (currentSnapshot) currentSnapshot.members.forEach(m => memberMap.set(m.id, m));
-
           data.items.forEach(item => {
             const li = document.createElement('li');
             li.className = 'item-row';
@@ -1921,9 +1686,8 @@
 
             const metaRow = document.createElement('div');
             metaRow.className = 'item-meta';
-            const payerName = memberMap.get(item.paid_by)?.name || ('Member #' + item.paid_by);
             const payerSpan = document.createElement('span');
-            payerSpan.textContent = 'Paid by ' + payerName;
+            payerSpan.textContent = 'Paid by ' + nameOf(item.paid_by, 'Member #');
             metaRow.appendChild(payerSpan);
 
             if (item.spent_on) {
@@ -1946,17 +1710,14 @@
               restoreBtn.textContent = 'Restore';
               restoreBtn.onclick = async () => {
                 restoreBtn.disabled = true;
-                const key = generateIdempotencyKey();
-                const rRes = await apiRequest('api/rooms/' + slug + '/expenses/' + item.id + '/restore', {
-                  method: 'POST',
-                  headers: {
-                    'Idempotency-Key': key,
-                    ...getActingMemberHeader(),
-                  },
-                });
-                if (rRes.ok) {
-                  showToast('Expense restored', item.title);
-                  executeSearch(true);
+                try {
+                  const rRes = await writeRequest('expenses/' + item.id + '/restore', 'POST');
+                  if (rRes.ok) {
+                    showToast('Expense restored', item.title);
+                    executeSearch(true);
+                  }
+                } finally {
+                  restoreBtn.disabled = false;
                 }
               };
               li.appendChild(restoreBtn);
@@ -2000,139 +1761,132 @@
 
       const targetInfo = document.getElementById('chaos-target-info');
       const target = snapshot.graph.chaos_target;
-      const memberMap = new Map();
-      snapshot.members.forEach(m => memberMap.set(m.id, m));
-
       if (targetInfo) {
-        if (target) {
-          const fromName = memberMap.get(target.from)?.name || '#' + target.from;
-          const toName = memberMap.get(target.to)?.name || '#' + target.to;
-          targetInfo.textContent = 'Target: ' + fromName + ' pays ' + toName + ' ' + formatMoney(target.amount_paise) +
-            ' (version ' + snapshot.room.graph_version + ')';
-        } else {
-          targetInfo.textContent = 'No chaos target available (all debts settled).';
+        targetInfo.textContent = target
+          ? 'Target: ' + nameOf(target.from) + ' pays ' + nameOf(target.to) + ' ' + formatMoney(target.amount_paise) +
+            ' (version ' + snapshot.room.graph_version + ')'
+          : 'No chaos target available (all debts settled).';
+      }
+    }
+
+    const runBtn = document.getElementById('chaos-run-btn');
+    if (runBtn) {
+      runBtn.onclick = async () => {
+        const snapshot = currentSnapshot;
+        const target = snapshot?.graph.chaos_target;
+        if (!target) {
+          showToast('Chaos halted', 'No settlement target available.');
+          return;
         }
-      }
 
-      const runBtn = document.getElementById('chaos-run-btn');
-      if (runBtn) {
-        runBtn.onclick = async () => {
-          if (!target) {
-            showToast('Chaos halted', 'No settlement target available.');
-            return;
-          }
+        let mode = 'PROTECTED';
+        const modeRadios = document.getElementsByName('chaos-mode');
+        for (let i = 0; i < modeRadios.length; i++) {
+          if (modeRadios[i].checked) mode = modeRadios[i].value;
+        }
 
-          let mode = 'PROTECTED';
-          const modeRadios = document.getElementsByName('chaos-mode');
-          for (let i = 0; i < modeRadios.length; i++) {
-            if (modeRadios[i].checked) mode = modeRadios[i].value;
-          }
+        let scenario = 'DEVICES';
+        const scenarioRadios = document.getElementsByName('chaos-scenario');
+        for (let i = 0; i < scenarioRadios.length; i++) {
+          if (scenarioRadios[i].checked) scenario = scenarioRadios[i].value;
+        }
 
-          let scenario = 'DEVICES';
-          const scenarioRadios = document.getElementsByName('chaos-scenario');
-          for (let i = 0; i < scenarioRadios.length; i++) {
-            if (scenarioRadios[i].checked) scenario = scenarioRadios[i].value;
-          }
+        runBtn.disabled = true;
 
-          runBtn.disabled = true;
+        // Keys: 10 distinct or 1 shared key repeated 10 times
+        let keys = [];
+        if (scenario === 'DEVICES') {
+          for (let i = 0; i < 10; i++) keys.push(generateIdempotencyKey());
+        } else {
+          const sharedKey = generateIdempotencyKey();
+          keys = Array(10).fill(sharedKey);
+        }
 
-          // Keys: 10 distinct or 1 shared key repeated 10 times
-          let keys = [];
-          if (scenario === 'DEVICES') {
-            for (let i = 0; i < 10; i++) keys.push(generateIdempotencyKey());
-          } else {
-            const sharedKey = generateIdempotencyKey();
-            keys = Array(10).fill(sharedKey);
-          }
+        const amountStr = (target.amount_paise / 100).toFixed(2);
+        const reqVersion = snapshot.room.graph_version;
 
-          const amountStr = (target.amount_paise / 100).toFixed(2);
-          const reqVersion = snapshot.room.graph_version;
+        const logBody = document.getElementById('chaos-log-body');
+        logBody?.replaceChildren();
 
-          const logBody = document.getElementById('chaos-log-body');
-          if (logBody) {
-            while (logBody.firstChild) logBody.removeChild(logBody.firstChild);
-          }
-
-          // Fire all 10 fetches in the SAME tick via Promise.allSettled
-          const promises = keys.map((key, idx) => {
-            const t0 = performance.now();
-            return fetch(BASE + 'api/rooms/' + slug + '/settlements', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Idempotency-Key': key,
-                ...getActingMemberHeader(),
-              },
-              body: JSON.stringify({
-                from_member: target.from,
-                to_member: target.to,
-                amount: amountStr,
-                expected_graph_version: reqVersion,
-                mode: mode,
-              }),
-            }).then(async res => {
-              const latency = Math.round(performance.now() - t0);
-              let data = null;
-              try { data = await res.json(); } catch (_) {}
-              return {
-                index: idx + 1,
-                status: res.status,
-                code: data?.code || (res.ok ? 'OK' : 'ERROR'),
-                latency,
-                receiptId: data?.settlement_id || data?.id || (data?.receipt?.id || null),
-              };
-            }).catch(err => {
-              const latency = Math.round(performance.now() - t0);
-              return {
-                index: idx + 1,
-                status: 0,
-                code: err.name || 'NET_ERROR',
-                latency,
-                receiptId: null,
-              };
-            });
+        // Fire all 10 fetches in the SAME tick via Promise.allSettled
+        const promises = keys.map((key, idx) => {
+          const t0 = performance.now();
+          return fetch(BASE + 'api/rooms/' + slug + '/settlements', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Idempotency-Key': key,
+              ...getActingMemberHeader(),
+            },
+            body: JSON.stringify({
+              from_member: target.from,
+              to_member: target.to,
+              amount: amountStr,
+              expected_graph_version: reqVersion,
+              mode: mode,
+            }),
+          }).then(async res => {
+            const latency = Math.round(performance.now() - t0);
+            let data = null;
+            try { data = await res.json(); } catch (_) {}
+            return {
+              index: idx + 1,
+              status: res.status,
+              code: data?.code || (res.ok ? 'OK' : 'ERROR'),
+              latency,
+              receiptId: data?.settlement_id || data?.id || (data?.receipt?.id || null),
+            };
+          }).catch(err => {
+            const latency = Math.round(performance.now() - t0);
+            return {
+              index: idx + 1,
+              status: 0,
+              code: err.name || 'NET_ERROR',
+              latency,
+              receiptId: null,
+            };
           });
+        });
 
-          const results = await Promise.allSettled(promises);
-          runBtn.disabled = false;
+        const results = await Promise.allSettled(promises);
+        runBtn.disabled = false;
 
-          // Compute summary and log table
-          const counts = {};
-          if (logBody) {
-            results.forEach(r => {
-              const res = r.value;
-              counts[res.status] = (counts[res.status] || 0) + 1;
+        // Compute summary and log table
+        const counts = {};
+        if (logBody) {
+          results.forEach(r => {
+            const res = r.value;
+            counts[res.status] = (counts[res.status] || 0) + 1;
 
-              const tr = document.createElement('tr');
-              [res.index, res.status, res.code, res.latency, res.receiptId || '—'].forEach(val => {
-                const td = document.createElement('td');
-                td.textContent = val.toString();
-                tr.appendChild(td);
-              });
-              logBody.appendChild(tr);
+            const tr = document.createElement('tr');
+            [res.index, res.status, res.code, res.latency, res.receiptId || '—'].forEach(val => {
+              const td = document.createElement('td');
+              td.textContent = val.toString();
+              tr.appendChild(td);
             });
-          }
+            logBody.appendChild(tr);
+          });
+        }
 
-          const summaryDiv = document.getElementById('chaos-summary');
-          if (summaryDiv) {
-            // DECISION: Sort summary with success code (201, then 200) first, then other status codes.
-            const sortedKeys = Object.keys(counts).sort((a, b) => {
-              const ca = parseInt(a, 10);
-              const cb = parseInt(b, 10);
-              if (ca === 201) return -1;
-              if (cb === 201) return 1;
-              if (ca === 200) return -1;
-              if (cb === 200) return 1;
-              return ca - cb;
-            });
-            const parts = sortedKeys.map(st => counts[st] + ' × ' + st);
-            summaryDiv.textContent = 'Summary: ' + parts.join(', ');
-          }
+        const summaryDiv = document.getElementById('chaos-summary');
+        if (summaryDiv) {
+          // DECISION: Sort summary with success code (201, then 200) first, then other status codes.
+          const sortedKeys = Object.keys(counts).sort((a, b) => {
+            const ca = parseInt(a, 10);
+            const cb = parseInt(b, 10);
+            if (ca === 201) return -1;
+            if (cb === 201) return 1;
+            if (ca === 200) return -1;
+            if (cb === 200) return 1;
+            return ca - cb;
+          });
+          const parts = sortedKeys.map(st => counts[st] + ' × ' + st);
+          summaryDiv.textContent = 'Summary: ' + parts.join(', ');
+        }
 
-          // Re-fetch state to show results
-          fetchStateHttp();
-        };
-      }
+        // Re-fetch state to show results
+        fetchStateHttp();
+      };
     }
 
     // Initial HTTP state fetch & WebSocket connect

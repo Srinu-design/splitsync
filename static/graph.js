@@ -15,11 +15,10 @@
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   }
 
+  // One formatter for every label; building an Intl.NumberFormat per call is slow.
+  const inrFormatter = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' });
   function formatMoneySimple(paise) {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
-    }).format((paise || 0) / 100);
+    return inrFormatter.format((paise || 0) / 100);
   }
 
   // DECISION: Draw graph using createElementNS with pure CSSOM and attributes without string HTML parsing.
@@ -129,7 +128,7 @@
       let targetX = x2;
       let targetY = y2;
       const tDx = x2 - cpX;
-      const tDy = x2 - cpY;
+      const tDy = y2 - cpY;
       const tDist = Math.hypot(tDx, tDy);
       if (tDist > 0) {
         targetX = x2 - (tDx / tDist) * (nodeR + 6);
@@ -304,8 +303,5 @@
     container.appendChild(hidden);
   }
 
-  global.SplitSyncGraph = {
-    renderSvgGraph,
-    getInitials,
-  };
+  global.SplitSyncGraph = { renderSvgGraph };
 })(window);
