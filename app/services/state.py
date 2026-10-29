@@ -61,25 +61,33 @@ GROUP BY s.member_id, e.paid_by;
 """
 
 
-class Snapshot(dict):
-    group_id: int
-
-
 def edge_json(edge):
     return {"from": edge[0], "to": edge[1], "amount_paise": edge[2]}
 
 
+def etag(version):
+    return f'"v{version}"'
+
+
 async def build_snapshot(engine, settings, slug):
+    return (await load_snapshot(engine, settings, slug))[1]
+
+
+async def load_snapshot(engine, settings, slug, if_none_match=None):
+    """Return (group id, snapshot); the snapshot is None when if_none_match is the current ETag."""
     cache = _caches.setdefault(engine, OrderedDict())
     # DECISION: One read-only repeatable-read snapshot prevents torn data poisoning (gid, version).
     async with engine.begin() as connection:
         await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         room = await read_room(connection, slug)
         gid, version = room["id"], room["graph_version"]
+        # A poll whose version is current needs only the room row, not the whole build.
+        if if_none_match == etag(version):
+            return gid, None
         key = (gid, version)
         if key in cache:
             cache.move_to_end(key)
-            return cache[key]
+            return gid, cache[key]
         members = [
             dict(row)
             for row in (
@@ -167,31 +175,28 @@ async def build_snapshot(engine, settings, slug):
                 recommended["edges"],
                 key=lambda edge: (-edge["amount_paise"], edge["from"], edge["to"]),
             )
-    snapshot = Snapshot(
-        {
-            "room": {
-                "slug": room["slug"],
-                "kind": room["kind"],
-                "name": room["name"],
-                "graph_version": version,
-                "expires_at": room["expires_at"].isoformat(),
-            },
-            "members": members,
-            "expenses": expenses,
-            "settlements": settlements,
-            "graph": graph,
-            "invariants": integrity_report(ledger_rows, bad_splits, orphan_edits),
-            "limits": limits(room, settings)._asdict(),
-            "usage": {
-                "members": len(members),
-                "expense_rows": expense_count,
-                "settlements": settlement_count,
-            },
-        }
-    )
-    snapshot.group_id = gid
+    snapshot = {
+        "room": {
+            "slug": room["slug"],
+            "kind": room["kind"],
+            "name": room["name"],
+            "graph_version": version,
+            "expires_at": room["expires_at"].isoformat(),
+        },
+        "members": members,
+        "expenses": expenses,
+        "settlements": settlements,
+        "graph": graph,
+        "invariants": integrity_report(ledger_rows, bad_splits, orphan_edits),
+        "limits": limits(room, settings)._asdict(),
+        "usage": {
+            "members": len(members),
+            "expense_rows": expense_count,
+            "settlements": settlement_count,
+        },
+    }
     cache[key] = snapshot
     cache.move_to_end(key)
     if len(cache) > 256:
         cache.popitem(last=False)
-    return snapshot
+    return gid, snapshot

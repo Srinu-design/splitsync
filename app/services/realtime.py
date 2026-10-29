@@ -6,7 +6,6 @@ from collections import defaultdict
 from typing import Any
 
 from fastapi import WebSocket
-from sqlalchemy import text
 
 from app.redis_client import RedisClient
 from app.services import state
@@ -23,7 +22,8 @@ class ConnectionManager:
 
     def can_connect(self, group_id: int, client_ip: str) -> bool:
         # DECISION: Per-worker caps: maximum 20 sockets per room and 5 sockets per client IP.
-        return len(self.rooms[group_id]) < 20 and len(self.ip_sockets[client_ip]) < 5
+        room, ip_set = self.rooms.get(group_id, ()), self.ip_sockets.get(client_ip, ())
+        return len(room) < 20 and len(ip_set) < 5
 
     def connect(self, group_id: int, client_ip: str, ws: WebSocket) -> None:
         self.rooms[group_id].add(ws)
@@ -31,13 +31,16 @@ class ConnectionManager:
         self.socket_ips[ws] = client_ip
 
     def disconnect(self, group_id: int, client_ip: str, ws: WebSocket) -> None:
-        self.rooms[group_id].discard(ws)
-        if not self.rooms[group_id]:
-            self.rooms.pop(group_id, None)
-
-        self.ip_sockets[client_ip].discard(ws)
-        if not self.ip_sockets[client_ip]:
-            self.ip_sockets.pop(client_ip, None)
+        room = self.rooms.get(group_id)
+        if room is not None:
+            room.discard(ws)
+            if not room:
+                del self.rooms[group_id]
+        ip_set = self.ip_sockets.get(client_ip)
+        if ip_set is not None:
+            ip_set.discard(ws)
+            if not ip_set:
+                del self.ip_sockets[client_ip]
         self.socket_ips.pop(ws, None)
 
     def format_message(self, text_payload: str) -> str:
@@ -72,17 +75,9 @@ class ConnectionManager:
 
         results = await asyncio.gather(*(_send(ws) for ws in sockets), return_exceptions=True)
         for item in results:
-            if isinstance(item, tuple):
-                ws, success = item
-                if not success:
-                    self.rooms[group_id].discard(ws)
-                    if not self.rooms[group_id]:
-                        self.rooms.pop(group_id, None)
-                    ip = self.socket_ips.pop(ws, None)
-                    if ip and ip in self.ip_sockets:
-                        self.ip_sockets[ip].discard(ws)
-                        if not self.ip_sockets[ip]:
-                            self.ip_sockets.pop(ip, None)
+            if isinstance(item, tuple) and not item[1]:
+                ws = item[0]
+                self.disconnect(group_id, self.socket_ips.get(ws, ""), ws)
 
 
 async def publish(
@@ -149,17 +144,8 @@ async def publish_snapshot_task(app: Any, slug: str) -> None:
         if manager is None:
             return
 
-        snapshot = await state.build_snapshot(engine, settings, slug)
+        group_id, snapshot = await state.load_snapshot(engine, settings, slug)
         version = snapshot["room"]["graph_version"]
-        group_id = getattr(snapshot, "group_id", None)
-        if group_id is None:
-            async with engine.connect() as connection:
-                group_id = await connection.scalar(
-                    text("SELECT id FROM groups WHERE slug = :slug"), {"slug": slug}
-                )
-        if group_id is None:
-            return
-
         payload = json.dumps({"type": "snapshot", "version": version, "state": snapshot})
         await publish(redis_client, manager, group_id, payload)
     except Exception as exc:

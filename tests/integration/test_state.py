@@ -295,6 +295,19 @@ async def test_etag_and_cache_follow_committed_versions(client, engine, demo):
         assert await connection.scalar(text("SELECT graph_version FROM groups")) == 10
 
 
+async def test_current_etag_is_304_without_building_a_snapshot(client, engine, demo):
+    from app.services.state import _caches
+
+    url = f"/api/rooms/{demo['slug']}/state"
+    etag = (await client.get(url)).headers["ETag"]
+    _caches.clear()  # another worker, or an evicted entry: nothing cached for this version
+    cached = await client.get(url, headers={"If-None-Match": etag})
+    assert cached.status_code == 304 and cached.headers["ETag"] == etag
+    assert not any(_caches.values()), "a 304 must answer from the room row alone"
+    stale = await client.get(url, headers={"If-None-Match": '"v8"'})
+    assert stale.status_code == 200 and stale.headers["ETag"] == etag
+
+
 @pytest.mark.parametrize("expired", [False, True])
 async def test_missing_or_expired_snapshot_is_404(client, engine, demo, expired):
     slug = demo["slug"] if expired else "unknown00"

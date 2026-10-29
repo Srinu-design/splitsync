@@ -9,6 +9,18 @@ from app.logging import logger as access_logger
 MAX_BODY_SIZE = 16 * 1024  # 16 KB = 16,384 bytes
 REQUEST_ID_REGEX = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
+# DECISION: Middleware adds CSP, X-Content-Type-Options, and Referrer-Policy to every HTTP
+# response because the shared host's proxy does not add them.
+SECURITY_HEADERS = [
+    (
+        b"content-security-policy",
+        b"default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        b"style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+    ),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"same-origin"),
+]
+
 
 def extract_room_slug(path: str) -> str | None:
     parts = [p for p in path.split("/") if p]
@@ -179,3 +191,28 @@ class ObservabilityMiddleware:
                     "outcome": outcome,
                 }
                 access_logger.info(json.dumps(log_data))
+
+
+class SecurityHeadersMiddleware:
+    """Plain ASGI, so each response skips the task group and streams of BaseHTTPMiddleware."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                names = {name for name, _ in SECURITY_HEADERS}
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() not in names]
+                headers += SECURITY_HEADERS
+                # Revalidate pages and assets (cheap with the ETag) so a deploy shows at once.
+                if not any(k.lower() == b"cache-control" for k, _ in headers):
+                    headers.append((b"cache-control", b"no-cache"))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
