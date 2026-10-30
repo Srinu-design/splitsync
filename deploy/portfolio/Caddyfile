@@ -11,7 +11,11 @@
 	handle_path /splitsync/* {
 		reverse_proxy splitsync-app:8000
 	}
-	# TriageLens will get its own handle_path block here.
+	# TriageLens: relative URLs too (BASE comes from its script's URL), so the prefix is stripped here.
+	redir /triagelens /triagelens/
+	handle_path /triagelens/* {
+		reverse_proxy triagelens-app:8000
+	}
 
 	handle {
 		respond "Not found" 404
