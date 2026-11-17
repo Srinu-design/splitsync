@@ -11,10 +11,15 @@
 	handle_path /splitsync/* {
 		reverse_proxy splitsync-app:8000
 	}
-	# TriageLens: relative URLs too (BASE comes from its script's URL), so the prefix is stripped here.
-	redir /triagelens /triagelens/
-	handle_path /triagelens/* {
+	# Clerk (formerly TriageLens): relative URLs too (BASE comes from its script's URL), so the
+	# prefix is stripped here. Old /triagelens links redirect permanently, keeping the rest of the path.
+	redir /clerk /clerk/
+	handle_path /clerk/* {
 		reverse_proxy triagelens-app:8000
+	}
+	redir /triagelens /clerk/ permanent
+	handle_path /triagelens/* {
+		redir * /clerk{uri} permanent
 	}
 
 	handle {
